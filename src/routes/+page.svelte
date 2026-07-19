@@ -146,7 +146,7 @@
   <header class="topbar">
     <div class="brand">
       <span class="logo-mark">▶</span>
-      <span class="title">ChatTerm</span>
+      <span class="title">Chatty</span>
     </div>
     <div class="status" class:ok={$connected}>
       <span class="dot"></span>

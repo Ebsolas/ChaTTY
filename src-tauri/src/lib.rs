@@ -5,7 +5,7 @@ use session::{AppState, SessionInfo, DEFAULT_SESSION_NAME};
 
 #[tauri::command]
 fn greet(name: &str) -> String {
-    format!("Hello, {name}! ChatTerm backend is up.")
+    format!("Hello, {name}! Chatty backend is up.")
 }
 
 #[tauri::command]

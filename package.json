@@ -1,5 +1,5 @@
 {
-  "name": "chatterm",
+  "name": "chatty",
   "version": "0.1.0",
   "description": "Conversational terminal — Discord-style chat over shell sessions",
   "type": "module",

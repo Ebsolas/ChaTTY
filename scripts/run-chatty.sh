@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Launch ChatTerm with a graphical session (Wayland/X11).
+# Launch Chatty with a graphical session (Wayland/X11).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$ROOT/src-tauri/target/release/chatterm"
+BIN="$ROOT/src-tauri/target/release/chatty"
 
 if [[ ! -x "$BIN" ]]; then
   echo "Binary not found: $BIN" >&2
