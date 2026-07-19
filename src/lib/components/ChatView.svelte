@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ChatMessage } from "$lib/types";
+  import { chordFor } from "$lib/stores";
   import Bubble from "./Bubble.svelte";
 
   interface Props {
@@ -25,8 +26,8 @@
     <div class="empty">
       <p class="lead">Talk to your local shell</p>
       <p class="muted">
-        Send a command below — click a bubble or press <kbd>Ctrl</kbd>+<kbd>`</kbd> to open the
-        session terminal.
+        Type a command below, or press <kbd>{chordFor("toggleTerminal")}</kbd> to open the session
+        terminal. New session: <kbd>{chordFor("newSession")}</kbd>.
       </p>
     </div>
   {:else}
@@ -44,6 +45,8 @@
     padding: 1rem 1.1rem 1.25rem;
     display: flex;
     flex-direction: column;
+    background: var(--bg, #0f1115);
+    color: var(--text, #e8eaed);
   }
 
   .empty {

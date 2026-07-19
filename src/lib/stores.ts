@@ -1,5 +1,12 @@
 import { writable, get, derived } from "svelte/store";
 import { stripAnsi } from "./ansi";
+import {
+  DEFAULT_BINDINGS,
+  formatChordDisplay,
+  mergeKeybindings,
+  type ActionId,
+  type KeybindingsMap,
+} from "./keybindings";
 import type {
   BackendSessionInfo,
   ChatMessage,
@@ -15,6 +22,25 @@ export const stickySessionId = writable<string | null>(null);
 export const backendError = writable<string | null>(null);
 export const connected = writable(false);
 export const expandedSessionId = writable<string | null>(null);
+
+/** Resolved keybindings (defaults ∪ user config). */
+export const keybindings = writable<KeybindingsMap>({ ...DEFAULT_BINDINGS });
+/** Path of loaded user keybindings file, if any. */
+export const keybindingsSource = writable<string | null>(null);
+export const keybindingsConfigDir = writable<string | null>(null);
+
+export function setKeybindings(
+  partial: Partial<KeybindingsMap> | Record<string, string>,
+  meta?: { sourcePath?: string | null; configDir?: string | null },
+) {
+  keybindings.set(mergeKeybindings(partial as Partial<KeybindingsMap>));
+  if (meta?.sourcePath !== undefined) keybindingsSource.set(meta.sourcePath);
+  if (meta?.configDir !== undefined) keybindingsConfigDir.set(meta.configDir);
+}
+
+export function chordFor(action: ActionId): string {
+  return formatChordDisplay(get(keybindings)[action] ?? DEFAULT_BINDINGS[action]);
+}
 
 /** Quiet after last PTY byte while capturing (only after we've seen data). */
 export const QUIET_MS = 650;
@@ -50,11 +76,15 @@ export function isSessionTui(sessionId: string): boolean {
   return get(altScreenSessions).has(sessionId);
 }
 
-export function backendToSession(info: BackendSessionInfo): SessionInfo {
+export function backendToSession(
+  info: BackendSessionInfo,
+  opts?: { starting?: boolean },
+): SessionInfo {
+  const starting = opts?.starting === true;
   return {
     id: info.id,
     name: info.name,
-    status: info.status,
+    status: starting ? "starting" : info.status,
     cwd: info.cwd ?? "",
     shell: info.shell ?? "",
     shellFlavor: info.shellFlavor ?? "",
@@ -63,6 +93,7 @@ export function backendToSession(info: BackendSessionInfo): SessionInfo {
     forkedFromMessageId: null,
     activity: "idle",
     tuiActive: false,
+    starting,
   };
 }
 
@@ -71,9 +102,60 @@ export function upsertSession(info: SessionInfo) {
     const idx = list.findIndex((s) => s.id === info.id);
     if (idx === -1) return [...list, info];
     const next = [...list];
-    next[idx] = { ...next[idx], ...info };
+    // Preserve activity/tui flags when a later backend snapshot is thinner.
+    next[idx] = {
+      ...next[idx],
+      ...info,
+      activity: info.activity ?? next[idx]!.activity,
+      tuiActive: info.tuiActive ?? next[idx]!.tuiActive,
+      starting: info.starting ?? next[idx]!.starting,
+    };
     return next;
   });
+}
+
+export function markSessionReady(sessionId: string) {
+  sessions.update((list) =>
+    list.map((s) =>
+      s.id === sessionId
+        ? { ...s, starting: false, status: s.status === "starting" ? "running" : s.status }
+        : s,
+    ),
+  );
+}
+
+/** Apply a renamed @name and keep chat bubbles in sync. */
+export function applySessionRename(sessionId: string, name: string) {
+  sessions.update((list) =>
+    list.map((s) => (s.id === sessionId ? { ...s, name } : s)),
+  );
+  messages.update((list) =>
+    list.map((m) =>
+      m.sessionId === sessionId ? { ...m, sessionName: name } : m,
+    ),
+  );
+}
+
+/** Remove a session from the rail (chat history for that id is kept). */
+export function removeSession(sessionId: string) {
+  sessions.update((list) => list.filter((s) => s.id !== sessionId));
+  altScreenSessions.update((set) => {
+    if (!set.has(sessionId)) return set;
+    const next = new Set(set);
+    next.delete(sessionId);
+    return next;
+  });
+  if (get(activeSessionId) === sessionId) {
+    const remaining = get(sessions);
+    activeSessionId.set(remaining[0]?.id ?? null);
+  }
+  if (get(stickySessionId) === sessionId) {
+    const remaining = get(sessions);
+    stickySessionId.set(remaining[0]?.id ?? null);
+  }
+  if (get(expandedSessionId) === sessionId) {
+    expandedSessionId.set(null);
+  }
 }
 
 export function setSessionProcessStatus(sessionId: string, status: SessionInfo["status"]) {

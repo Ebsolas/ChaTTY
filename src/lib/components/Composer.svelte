@@ -1,6 +1,6 @@
 <script lang="ts">
   import { mentionSuggestions } from "$lib/mentions";
-  import { sessions, stickySessionId } from "$lib/stores";
+  import { chordFor, sessions, stickySessionId } from "$lib/stores";
 
   interface Props {
     disabled?: boolean;
@@ -164,6 +164,7 @@
   >
     <input
       class="composer-input"
+      data-composer-input
       type="text"
       placeholder={stickyIsTui
         ? `@${stickyName} is in TUI — open session or @another session`
@@ -188,9 +189,9 @@
   </form>
   <p class="hint">
     {#if stickyIsTui}
-      @{stickyName} is in interactive UI — chat won't inject into it · Ctrl+` to open session
+      @{stickyName} is in interactive UI — chat won't inject · {chordFor("toggleTerminal")} open session
     {:else}
-      @session cmd · sticky @{stickyName} · Ctrl+` session · click bubble to open
+      @session cmd · sticky @{stickyName} · {chordFor("toggleTerminal")} terminal · {chordFor("focusComposer")} focus
     {/if}
   </p>
 </div>
@@ -198,7 +199,9 @@
 <style>
   .composer-wrap {
     position: relative;
-    background: var(--bg-panel);
+    background: var(--bg-panel, #12151c);
+    color: var(--text, #e8eaed);
+    border-top: 1px solid var(--border, #232833);
   }
 
   .suggest {

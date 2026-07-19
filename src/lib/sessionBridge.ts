@@ -13,14 +13,17 @@ import {
   activeTurn,
   altScreenSessions,
   appendUserMessage,
+  applySessionRename,
   backendError,
   backendToSession,
   connected,
   expandedSessionId,
   formatPtyCapture,
+  markSessionReady,
   MIN_AFTER_FIRST_CHUNK_MS,
   openSessionBubble,
   QUIET_MS,
+  removeSession,
   sealTurn,
   sessions,
   setSessionActivity,
@@ -37,6 +40,7 @@ import type {
   SessionExitEvent,
   SessionInfo,
   SessionOutputEvent,
+  SessionRemovedEvent,
   SessionStatusEvent,
 } from "./types";
 
@@ -50,12 +54,42 @@ let maxTimer: ReturnType<typeof setTimeout> | null = null;
 type RawListener = (sessionId: string, chunk: string) => void;
 const rawListeners = new Set<RawListener>();
 
+/** Coalesce xterm/raw writes to one rAF tick so login-shell floods don't jank. */
+const rawPending = new Map<string, string>();
+let rawFlushScheduled = false;
+
 /** Keys typed in the session terminal since the last Enter (for chat mirroring). */
 const termLineBuf = new Map<string, string>();
 
 export function subscribeRawOutput(fn: RawListener): () => void {
   rawListeners.add(fn);
   return () => rawListeners.delete(fn);
+}
+
+function notifyRawListeners(sessionId: string, text: string) {
+  if (!text || rawListeners.size === 0) return;
+  rawPending.set(sessionId, (rawPending.get(sessionId) ?? "") + text);
+  if (rawFlushScheduled) return;
+  rawFlushScheduled = true;
+  const schedule =
+    typeof requestAnimationFrame === "function"
+      ? requestAnimationFrame
+      : (cb: FrameRequestCallback) => setTimeout(() => cb(performance.now()), 16);
+  schedule(() => {
+    rawFlushScheduled = false;
+    if (rawPending.size === 0) return;
+    const batch = new Map(rawPending);
+    rawPending.clear();
+    for (const [id, chunk] of batch) {
+      for (const fn of rawListeners) {
+        try {
+          fn(id, chunk);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  });
 }
 
 export function getPtyScrollback(sessionId: string): string {
@@ -102,13 +136,7 @@ function appendPty(sessionId: string, text: string) {
     }
   }
 
-  for (const fn of rawListeners) {
-    try {
-      fn(sessionId, text);
-    } catch {
-      /* ignore */
-    }
-  }
+  notifyRawListeners(sessionId, text);
 
   const turn = get(activeTurn);
   if (!turn || turn.sessionId !== sessionId) return;
@@ -247,13 +275,21 @@ export async function initSessionBridge(): Promise<void> {
     activeSessionId.set(session.id);
     stickySessionId.set(session.id);
     const listed = await invoke<BackendSessionInfo[]>("list_sessions");
-    sessions.set(listed.map(backendToSession));
+    sessions.set(listed.map((s) => backendToSession(s)));
     connected.set(true);
   } catch (err) {
     backendError.set(String(err));
     connected.set(false);
     throw err;
   }
+
+  // Early paint: backend emits this as soon as the slot is reserved (before fork/exec).
+  unlistens.push(
+    await listen<BackendSessionInfo>("session-created", (event) => {
+      const session = backendToSession(event.payload, { starting: true });
+      upsertSession(session);
+    }),
+  );
 
   unlistens.push(
     await listen<SessionOutputEvent>("session-output", (event) => {
@@ -271,13 +307,100 @@ export async function initSessionBridge(): Promise<void> {
 
   unlistens.push(
     await listen<SessionExitEvent>("session-exit", (event) => {
-      setSessionProcessStatus(event.payload.sessionId, "exited");
-      if (get(activeTurn)?.sessionId === event.payload.sessionId) {
+      const { sessionId } = event.payload;
+      // If we already closed/removed this session, ignore natural exit noise.
+      if (!get(sessions).some((s) => s.id === sessionId)) return;
+      setSessionProcessStatus(sessionId, "exited");
+      if (get(activeTurn)?.sessionId === sessionId) {
         sealTurn("error");
         clearTimers();
       }
     }),
   );
+
+  unlistens.push(
+    await listen<SessionRemovedEvent>("session-removed", (event) => {
+      forgetSessionLocally(event.payload.sessionId);
+    }),
+  );
+
+  unlistens.push(
+    await listen<BackendSessionInfo>("session-renamed", (event) => {
+      const { id, name } = event.payload;
+      if (id && name) applySessionRename(id, name);
+    }),
+  );
+}
+
+/** Drop frontend bookkeeping for a session (PTY scrollback, turns, stores). */
+function forgetSessionLocally(sessionId: string) {
+  if (get(activeTurn)?.sessionId === sessionId) {
+    sealTurn("error");
+    clearTimers();
+  }
+  ptyScrollback.delete(sessionId);
+  termLineBuf.delete(sessionId);
+  removeSession(sessionId);
+}
+
+/**
+ * Spawn a new interactive shell session (unique @name).
+ * Optional `name` is sanitized; if taken, backend suffixes -2, -3, …
+ *
+ * The rail updates as soon as the backend emits `session-created` (before the
+ * login shell finishes forking). This promise resolves when the PTY is ready.
+ */
+export async function createSession(name?: string): Promise<SessionInfo> {
+  const info = await invoke<BackendSessionInfo>("create_session", {
+    name: name?.trim() ? name.trim() : null,
+  });
+  const session = backendToSession(info, { starting: false });
+  upsertSession(session);
+  markSessionReady(session.id);
+  activeSessionId.set(session.id);
+  stickySessionId.set(session.id);
+  backendError.set(null);
+  return session;
+}
+
+/**
+ * Kill and remove a session. Chat bubbles for that session stay in history.
+ * Refuses to remove the last remaining session (creates none automatically).
+ */
+export async function closeSession(sessionId: string): Promise<void> {
+  const list = get(sessions);
+  if (list.length <= 1) {
+    throw new Error("Cannot remove the last session — add another first, or keep one open.");
+  }
+  if (!list.some((s) => s.id === sessionId)) {
+    throw new Error("Session not found");
+  }
+
+  await invoke("close_session", { sessionId });
+  // Also handled by session-removed; call locally so UI updates immediately.
+  forgetSessionLocally(sessionId);
+  backendError.set(null);
+}
+
+/**
+ * Rename a session for @mentions. Names are sanitized (letters, numbers, . _ -)
+ * and must be unique across sessions.
+ */
+export async function renameSession(
+  sessionId: string,
+  name: string,
+): Promise<SessionInfo> {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    throw new Error("Name cannot be empty");
+  }
+  const info = await invoke<BackendSessionInfo>("rename_session", {
+    sessionId,
+    name: trimmed,
+  });
+  applySessionRename(info.id, info.name);
+  backendError.set(null);
+  return backendToSession(info);
 }
 
 export async function teardownSessionBridge(): Promise<void> {
@@ -290,6 +413,8 @@ export async function teardownSessionBridge(): Promise<void> {
     }
   }
   rawListeners.clear();
+  rawPending.clear();
+  rawFlushScheduled = false;
   activeTurn.set(null);
   ptyScrollback.clear();
   termLineBuf.clear();
@@ -317,6 +442,10 @@ function sessionIsTui(s: SessionInfo): boolean {
   return s.activity === "tui" || !!s.tuiActive || get(altScreenSessions).has(s.id);
 }
 
+function sessionIsStarting(s: SessionInfo): boolean {
+  return !!s.starting || s.status === "starting";
+}
+
 export async function sendCommand(text: string): Promise<void> {
   const trimmed = text.replace(/\s+$/, "");
   if (!trimmed) return;
@@ -332,6 +461,12 @@ export async function sendCommand(text: string): Promise<void> {
     stickySessionId.set(t.id);
     activeSessionId.set(t.id);
     return;
+  }
+
+  const starting = parsed.targets.filter(sessionIsStarting);
+  if (starting.length) {
+    const names = starting.map((t) => `@${t.name}`).join(", ");
+    throw new Error(`${names} is still starting — try again in a moment.`);
   }
 
   const blocked = parsed.targets.filter(sessionIsTui);

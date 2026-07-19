@@ -1,0 +1,21 @@
+{
+  "$comment": "Copy to ~/.config/chatty/keybindings.json and edit. Unlisted actions keep defaults. Modifier names: Alt, Ctrl, Shift, Meta. Keys: letters, 1-9, Backquote (`), BracketLeft ([), BracketRight (]).",
+  "bindings": {
+    "toggleTerminal": "Alt+Backquote",
+    "newSession": "Alt+N",
+    "closeSession": "Alt+W",
+    "renameSession": "Alt+R",
+    "focusComposer": "Alt+C",
+    "nextSession": "Alt+BracketRight",
+    "prevSession": "Alt+BracketLeft",
+    "session1": "Alt+1",
+    "session2": "Alt+2",
+    "session3": "Alt+3",
+    "session4": "Alt+4",
+    "session5": "Alt+5",
+    "session6": "Alt+6",
+    "session7": "Alt+7",
+    "session8": "Alt+8",
+    "session9": "Alt+9"
+  }
+}

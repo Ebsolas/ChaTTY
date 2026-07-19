@@ -71,12 +71,12 @@ pub fn exec_invocation(
     command: &str,
 ) -> (String, Vec<String>) {
     // Pass command via env to avoid quoting landmines across shells.
-    // Script reads CHATTERM_CMD.
+    // Script reads CHATTY_CMD.
     let script = match flavor {
         ShellFlavor::Fish => {
             // fish: use eval on the env var
             r#"
-set -l __ct_cmd $CHATTERM_CMD
+set -l __ct_cmd $CHATTY_CMD
 eval $__ct_cmd
 set -l __ct_s $status
 printf '\n\036CT:CWD:%s\036\n' (pwd)
@@ -87,7 +87,7 @@ exit $__ct_s
             .to_string()
         }
         ShellFlavor::Bash | ShellFlavor::Zsh | ShellFlavor::Sh => r#"
-eval "$CHATTERM_CMD"
+eval "$CHATTY_CMD"
 __ct_s=$?
 printf '\n\036CT:CWD:%s\036\n' "$(pwd -P 2>/dev/null || pwd)"
 printf '\036CT:CODE:%d\036\n' "$__ct_s"

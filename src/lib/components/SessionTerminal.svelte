@@ -35,70 +35,110 @@
   let ro: ResizeObserver | undefined;
 
   onMount(() => {
-    term = new Terminal({
-      cursorBlink: true,
-      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-      fontSize: 14,
-      lineHeight: 1.2,
-      theme: {
-        background: "#0d1017",
-        foreground: "#e8eaed",
-        cursor: "#4c8dff",
-        selectionBackground: "#2a4a86",
-        black: "#1c2230",
-        red: "#e35d6a",
-        green: "#3dd68c",
-        yellow: "#f0b429",
-        blue: "#4c8dff",
-        magenta: "#c792ea",
-        cyan: "#89ddff",
-        white: "#e8eaed",
-        brightBlack: "#8b93a7",
-      },
-      allowProposedApi: true,
-      scrollback: 8000,
-      convertEol: false,
-    });
-    fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(host!);
+    // Defer xterm construction so the overlay chrome paints first.
+    let cancelled = false;
+    let writeBuf = "";
+    let writeScheduled = false;
 
-    // Full interactive shell stream from process start (profile, fastfetch, chat, typing).
-    const history = getPtyScrollback(sessionId);
-    if (history) {
-      term.write(history);
-    }
-
-    fit.fit();
-    void pushSize();
-
-    // Single path for keys → PTY. sendRawToSession normalizes Enter to one CR.
-    term.onData((data) => {
-      void sendRawToSession(sessionId, data).catch(console.error);
-    });
-
-    unsubRaw = subscribeRawOutput((id, chunk) => {
-      if (id !== sessionId || !term) return;
+    const flushWrite = () => {
+      writeScheduled = false;
+      if (!term || !writeBuf) return;
+      const chunk = writeBuf;
+      writeBuf = "";
       term.write(chunk);
-    });
+    };
 
-    // Debounce resize → SIGWINCH; rapid resizes during chat UI updates
-    // can confuse zsh line editing (feels like "press Enter twice").
-    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-    ro = new ResizeObserver(() => {
-      if (resizeTimer) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        try {
-          fit?.fit();
-          void pushSize();
-        } catch {
-          /* ignore */
-        }
-      }, 120);
-    });
-    if (host) ro.observe(host);
+    const queueWrite = (data: string) => {
+      if (!data) return;
+      writeBuf += data;
+      if (writeScheduled) return;
+      writeScheduled = true;
+      requestAnimationFrame(flushWrite);
+    };
 
-    term.focus();
+    const boot = () => {
+      if (cancelled || !host) return;
+
+      term = new Terminal({
+        cursorBlink: true,
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+        fontSize: 14,
+        lineHeight: 1.2,
+        theme: {
+          background: "#0d1017",
+          foreground: "#e8eaed",
+          cursor: "#4c8dff",
+          selectionBackground: "#2a4a86",
+          black: "#1c2230",
+          red: "#e35d6a",
+          green: "#3dd68c",
+          yellow: "#f0b429",
+          blue: "#4c8dff",
+          magenta: "#c792ea",
+          cyan: "#89ddff",
+          white: "#e8eaed",
+          brightBlack: "#8b93a7",
+        },
+        allowProposedApi: true,
+        scrollback: 8000,
+        convertEol: false,
+      });
+      fit = new FitAddon();
+      term.loadAddon(fit);
+      term.open(host);
+
+      // Replay scrollback in rAF-sized chunks so huge login output doesn't freeze.
+      const history = getPtyScrollback(sessionId);
+      if (history) {
+        const CHUNK = 16_384;
+        let offset = 0;
+        const pump = () => {
+          if (cancelled || !term) return;
+          if (offset >= history.length) {
+            fit?.fit();
+            void pushSize();
+            term.focus();
+            return;
+          }
+          term.write(history.slice(offset, offset + CHUNK));
+          offset += CHUNK;
+          requestAnimationFrame(pump);
+        };
+        requestAnimationFrame(pump);
+      } else {
+        fit.fit();
+        void pushSize();
+        term.focus();
+      }
+
+      // Single path for keys → PTY. sendRawToSession normalizes Enter to one CR.
+      term.onData((data) => {
+        void sendRawToSession(sessionId, data).catch(console.error);
+      });
+
+      unsubRaw = subscribeRawOutput((id, chunk) => {
+        if (id !== sessionId || !term) return;
+        queueWrite(chunk);
+      });
+
+      // Debounce resize → SIGWINCH; rapid resizes during chat UI updates
+      // can confuse zsh line editing (feels like "press Enter twice").
+      let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+      ro = new ResizeObserver(() => {
+        if (resizeTimer) clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+          try {
+            fit?.fit();
+            void pushSize();
+          } catch {
+            /* ignore */
+          }
+        }, 120);
+      });
+      if (host) ro.observe(host);
+    };
+
+    const bootRaf = requestAnimationFrame(boot);
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -109,6 +149,8 @@
     window.addEventListener("keydown", onKey, true);
 
     return () => {
+      cancelled = true;
+      cancelAnimationFrame(bootRaf);
       window.removeEventListener("keydown", onKey, true);
     };
   });
@@ -151,7 +193,7 @@
       <span class="hint">
         {sessionState?.activity === "tui" || sessionState?.tuiActive
           ? "Full-screen app · Esc closes view"
-          : "Lines appear in chat · Esc closes"}
+          : "Lines appear in chat · Esc closes view"}
       </span>
       <button type="button" class="close" onclick={() => closeExpandedSession()}>Close</button>
     </div>

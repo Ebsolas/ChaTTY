@@ -1,6 +1,6 @@
 /** Domain types — shell-agnostic session service + fork-ready fields. */
 
-export type ProcessStatus = "running" | "exited";
+export type ProcessStatus = "starting" | "running" | "exited";
 /** idle = at prompt; busy = line command in flight; tui = full-screen app */
 export type SessionActivity = "idle" | "busy" | "tui";
 export type TurnStatus = "running" | "ok" | "error" | "tui";
@@ -19,6 +19,8 @@ export interface SessionInfo {
   lastCommand?: string;
   /** True while alternate screen (vim, htop, …) is active. */
   tuiActive?: boolean;
+  /** True while the backend is still spawning the PTY. */
+  starting?: boolean;
 }
 
 export interface BackendSessionInfo {
@@ -61,6 +63,10 @@ export interface SessionStatusEvent {
 export interface SessionExitEvent {
   sessionId: string;
   code?: number | null;
+}
+
+export interface SessionRemovedEvent {
+  sessionId: string;
 }
 
 export interface RunOutputEvent {
