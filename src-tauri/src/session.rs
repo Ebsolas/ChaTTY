@@ -14,7 +14,7 @@ use std::os::fd::RawFd;
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 use crate::shell::{self, ShellFlavor};
@@ -22,6 +22,8 @@ use crate::shell::{self, ShellFlavor};
 pub const DEFAULT_SESSION_NAME: &str = "local";
 /// Soft cap for concurrent interactive shells (MVP2 multi-session).
 const MAX_SESSIONS: usize = 16;
+/// Prefix for tmux session names on the Chatty host (never on SSH remotes).
+const TMUX_NAME_PREFIX: &str = "chatty_";
 
 const DEFAULT_ROWS: u16 = 40;
 const DEFAULT_COLS: u16 = 120;
@@ -38,6 +40,24 @@ pub enum SessionStatus {
     Exited,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionBackend {
+    /// Outer PTY runs `tmux new-session -A` (durable on Chatty host).
+    Tmux,
+    /// Outer PTY runs the shell directly (no reattach after quit).
+    Plain,
+}
+
+impl SessionBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionBackend::Tmux => "tmux",
+            SessionBackend::Plain => "plain",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
@@ -47,6 +67,8 @@ pub struct SessionInfo {
     pub cwd: String,
     pub shell: String,
     pub shell_flavor: String,
+    /// How this session is hosted: "tmux" | "plain".
+    pub backend: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -74,6 +96,25 @@ pub struct SessionExitEvent {
 #[serde(rename_all = "camelCase")]
 pub struct SessionRemovedEvent {
     pub session_id: String,
+}
+
+/// Process-level activity from tmux pane_current_command (host-local).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PaneActivity {
+    Idle,
+    Busy,
+    Tui,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionActivityEvent {
+    pub session_id: String,
+    pub activity: PaneActivity,
+    /// Foreground process name from tmux, if any.
+    pub command: String,
+    pub cwd: String,
 }
 
 /// Full session snapshot after rename (same shape as SessionInfo).
@@ -120,6 +161,14 @@ struct LiveSession {
     cwd: PathBuf,
     shell: String,
     flavor: ShellFlavor,
+    backend: SessionBackend,
+    /// tmux session name on this host when backend is Tmux.
+    tmux_name: Option<String>,
+    /// Last polled foreground command (dedupe activity events).
+    last_poll_cmd: Option<String>,
+    last_poll_path: Option<String>,
+    /// Whether we already forced `status off` on this tmux session.
+    tmux_status_off: bool,
     /// Optional interactive terminal backend.
     pty: Option<InteractivePty>,
 }
@@ -238,10 +287,14 @@ impl SessionManager {
 
     /// Reserve a session slot and unique name (PTY not ready yet).
     /// Keeps the manager lock short so other sessions stay responsive.
+    ///
+    /// `fixed_id` / `preferred_cwd` are used when restoring saved sessions.
     pub fn begin_create(
         &mut self,
         app: &AppHandle,
         name: Option<String>,
+        fixed_id: Option<String>,
+        preferred_cwd: Option<String>,
     ) -> Result<SessionInfo, String> {
         if self.sessions.len() >= self.max_sessions {
             return Err(format!(
@@ -251,10 +304,32 @@ impl SessionManager {
         }
 
         let name = self.allocate_name(name);
-        let id = Uuid::new_v4().to_string();
+        let id = match fixed_id {
+            Some(s) => {
+                let s = s.trim().to_string();
+                if s.is_empty() {
+                    Uuid::new_v4().to_string()
+                } else if self.sessions.contains_key(&s) {
+                    return Err(format!("session id already exists: {s}"));
+                } else {
+                    s
+                }
+            }
+            None => Uuid::new_v4().to_string(),
+        };
+
         let shell = shell::resolve_shell();
         let flavor = ShellFlavor::detect(&shell);
-        let cwd = shell::default_cwd();
+        let cwd = preferred_cwd
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(shell::default_cwd);
+
+        let (backend, tmux_name) = if tmux_available() {
+            (SessionBackend::Tmux, Some(tmux_session_name(&id)))
+        } else {
+            (SessionBackend::Plain, None)
+        };
 
         let live = LiveSession {
             id: id.clone(),
@@ -263,6 +338,11 @@ impl SessionManager {
             cwd,
             shell,
             flavor,
+            backend,
+            tmux_name,
+            last_poll_cmd: None,
+            last_poll_path: None,
+            tmux_status_off: false,
             pty: None,
         };
 
@@ -313,13 +393,20 @@ impl SessionManager {
         );
     }
 
-    /// Kill the interactive shell and remove the session from the manager.
+    /// Destroy a session: kill durable tmux session (if any) + outer PTY client.
+    /// App quit should NOT call this for every session — only detach the client.
     pub fn close(&mut self, app: &AppHandle, session_id: &str) -> Result<(), String> {
         let mut live = self
             .sessions
             .remove(session_id)
             .ok_or_else(|| format!("unknown session: {session_id}"))?;
         self.order.retain(|id| id != session_id);
+
+        // Explicit close = user wants the session gone. tmux lives only on the
+        // Chatty host (SSH remotes never need tmux).
+        if let Some(ref tmux_name) = live.tmux_name {
+            let _ = kill_tmux_session(tmux_name);
+        }
 
         if let Some(pty) = live.pty.take() {
             pty.alive.store(false, Ordering::SeqCst);
@@ -563,7 +650,395 @@ fn session_info(s: &LiveSession) -> SessionInfo {
         cwd: s.cwd.to_string_lossy().into_owned(),
         shell: s.shell.clone(),
         shell_flavor: s.flavor.as_str().to_string(),
+        backend: s.backend.as_str().to_string(),
     }
+}
+
+/// Stable tmux session name for a Chatty session id (host-local only).
+pub fn tmux_session_name(session_id: &str) -> String {
+    let mut out = String::with_capacity(TMUX_NAME_PREFIX.len() + session_id.len());
+    out.push_str(TMUX_NAME_PREFIX);
+    for ch in session_id.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.len() > 64 {
+        out.truncate(64);
+    }
+    out
+}
+
+fn tmux_available() -> bool {
+    find_tmux().is_some()
+}
+
+fn find_tmux() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("CHATTY_TMUX") {
+        let pb = PathBuf::from(p);
+        if pb.is_file() {
+            return Some(pb);
+        }
+    }
+    for cand in [
+        "/usr/bin/tmux",
+        "/usr/local/bin/tmux",
+        "/bin/tmux",
+        "/opt/homebrew/bin/tmux",
+    ] {
+        let p = PathBuf::from(cand);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    match Command::new("tmux")
+        .arg("-V")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(st) if st.success() => Some(PathBuf::from("tmux")),
+        _ => None,
+    }
+}
+
+fn kill_tmux_session(tmux_name: &str) -> Result<(), String> {
+    let tmux = find_tmux().ok_or_else(|| "tmux not found".to_string())?;
+    let _ = Command::new(tmux)
+        .args(["kill-session", "-t", tmux_name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("tmux kill-session: {e}"))?;
+    Ok(())
+}
+
+/// Whether Chatty will host new sessions under tmux on this machine.
+pub fn host_session_backend() -> SessionBackend {
+    if tmux_available() {
+        SessionBackend::Tmux
+    } else {
+        SessionBackend::Plain
+    }
+}
+
+fn is_shell_command(cmd: &str, shell_path: &str) -> bool {
+    let c = cmd.trim().to_ascii_lowercase();
+    if c.is_empty() {
+        return true;
+    }
+    const SHELLS: &[&str] = &[
+        "zsh", "bash", "fish", "sh", "dash", "ksh", "csh", "tcsh", "nu", "pwsh", "powershell",
+    ];
+    if SHELLS.iter().any(|s| c == *s || c.ends_with(&format!("/{s}"))) {
+        return true;
+    }
+    let base = std::path::Path::new(shell_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    !base.is_empty() && (c == base || c.ends_with(&format!("/{base}")))
+}
+
+fn is_tui_command(cmd: &str) -> bool {
+    let c = cmd.trim().to_ascii_lowercase();
+    let base = c.rsplit('/').next().unwrap_or(&c);
+    const TUIS: &[&str] = &[
+        "vim", "nvim", "vi", "view", "vimdiff", "nvimdiff", "emacs", "nano", "micro", "helix",
+        "kak", "htop", "btop", "top", "iotop", "nvitop", "less", "more", "most", "ranger",
+        "lf", "nnn", "vifm", "mc", "lazygit", "tig", "gitui", "fzf", "fzy", "watch", "tmux",
+        "screen", "man", "info",
+    ];
+    TUIS.iter().any(|t| base == *t)
+}
+
+fn classify_pane_command(cmd: &str, shell_path: &str) -> PaneActivity {
+    if is_shell_command(cmd, shell_path) {
+        PaneActivity::Idle
+    } else if is_tui_command(cmd) {
+        PaneActivity::Tui
+    } else {
+        PaneActivity::Busy
+    }
+}
+
+struct TmuxPaneSnapshot {
+    command: String,
+    path: String,
+    dead: bool,
+}
+
+/// Interpreters whose cmdline often holds the real program (e.g. python → ranger).
+const INTERPRETERS: &[&str] = &[
+    "python", "python2", "python3", "node", "nodejs", "perl", "ruby", "lua", "php", "bash", "sh",
+    "zsh", "fish",
+];
+
+fn read_proc_comm(pid: i32) -> Option<String> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    Some(s.trim().to_string())
+}
+
+fn read_proc_cmdline(pid: i32) -> Option<String> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = raw
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| std::str::from_utf8(p).ok())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join(" "))
+}
+
+fn proc_children(pid: i32) -> Vec<i32> {
+    let mut kids = Vec::new();
+    let task_dir = format!("/proc/{pid}/task");
+    let Ok(entries) = std::fs::read_dir(&task_dir) else {
+        return kids;
+    };
+    for ent in entries.flatten() {
+        let path = ent.path().join("children");
+        if let Ok(text) = std::fs::read_to_string(path) {
+            for tok in text.split_whitespace() {
+                if let Ok(c) = tok.parse::<i32>() {
+                    kids.push(c);
+                }
+            }
+        }
+    }
+    kids.sort_unstable();
+    kids.dedup();
+    kids
+}
+
+fn basename_os(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Resolve a human command name from pane pid (handles `python /usr/bin/ranger`).
+///
+/// When tmux already reports a shell (idle), **trust that** — do not walk
+/// children (async prompt helpers / gitstatus would false-busy the session).
+fn resolve_display_command(pane_pid: i32, tmux_cmd: &str, shell_path: &str) -> String {
+    use std::collections::VecDeque;
+
+    let tmux_l = tmux_cmd.trim().to_ascii_lowercase();
+    if is_shell_command(&tmux_l, shell_path) {
+        return tmux_l;
+    }
+
+    let shells: std::collections::HashSet<&str> = [
+        "zsh", "bash", "fish", "sh", "dash", "ksh", "csh", "tcsh", "nu", "tmux",
+    ]
+    .into_iter()
+    .collect();
+
+    let mut q = VecDeque::from([pane_pid]);
+    let mut seen = std::collections::HashSet::new();
+
+    while let Some(pid) = q.pop_front() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        let comm = read_proc_comm(pid).unwrap_or_default();
+        let cmdline = read_proc_cmdline(pid).unwrap_or_default();
+        let comm_l = comm.to_ascii_lowercase();
+
+        if !comm.is_empty() && !shells.contains(comm_l.as_str()) {
+            // Interpreter wrappers: prefer script basename from cmdline.
+            if INTERPRETERS
+                .iter()
+                .any(|i| comm_l == *i || comm_l.starts_with(&format!("{i}.")))
+            {
+                for tok in cmdline.split_whitespace() {
+                    if tok.starts_with('-') {
+                        continue;
+                    }
+                    let base = basename_os(tok).to_ascii_lowercase();
+                    if base.is_empty()
+                        || INTERPRETERS
+                            .iter()
+                            .any(|i| base == *i || base.starts_with(&format!("{i}.")))
+                    {
+                        continue;
+                    }
+                    if shells.contains(base.as_str()) {
+                        continue;
+                    }
+                    return base;
+                }
+            }
+            return comm_l;
+        }
+
+        for c in proc_children(pid) {
+            q.push_back(c);
+        }
+    }
+
+    tmux_l
+}
+
+fn query_tmux_pane(tmux_name: &str, shell_path: &str) -> Option<TmuxPaneSnapshot> {
+    let tmux = find_tmux()?;
+    let output = Command::new(tmux)
+        .args([
+            "list-panes",
+            "-t",
+            tmux_name,
+            "-F",
+            "#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_dead}",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().next()?.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let mut parts = line.splitn(4, '\t');
+    let pid: i32 = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    let tmux_cmd = parts.next().unwrap_or("").to_string();
+    let path = parts.next().unwrap_or("").to_string();
+    let dead = parts.next().unwrap_or("0") == "1";
+    let command = if pid > 0 {
+        resolve_display_command(pid, &tmux_cmd, shell_path)
+    } else {
+        tmux_cmd.trim().to_ascii_lowercase()
+    };
+    Some(TmuxPaneSnapshot {
+        command,
+        path,
+        dead,
+    })
+}
+
+/// Poll all tmux-backed sessions and emit activity events when state changes.
+///
+/// Idle is re-emitted periodically even when the command string is unchanged so
+/// the frontend can clear optimistic "busy" after fast commands (poll never
+/// observed a non-shell process).
+pub fn poll_tmux_activity(app: &AppHandle, mgr: &mut SessionManager) {
+    let targets: Vec<(String, String, String)> = mgr
+        .sessions
+        .values()
+        .filter(|s| s.backend == SessionBackend::Tmux)
+        .filter_map(|s| {
+            s.tmux_name
+                .as_ref()
+                .map(|n| (s.id.clone(), n.clone(), s.shell.clone()))
+        })
+        .collect();
+
+    for (session_id, tmux_name, shell) in targets {
+        // Once per session: strip green status bar (existing sessions predate conf).
+        let needs_status_off = mgr
+            .sessions
+            .get(&session_id)
+            .map(|s| !s.tmux_status_off)
+            .unwrap_or(true);
+        if needs_status_off {
+            ensure_tmux_status_off(&tmux_name);
+            if let Some(live) = mgr.sessions.get_mut(&session_id) {
+                live.tmux_status_off = true;
+            }
+        }
+
+        let Some(snap) = query_tmux_pane(&tmux_name, &shell) else {
+            continue;
+        };
+        if snap.dead {
+            continue;
+        }
+        let activity = classify_pane_command(&snap.command, &shell);
+        let prev_cmd = mgr
+            .sessions
+            .get(&session_id)
+            .and_then(|s| s.last_poll_cmd.clone());
+        let prev_path = mgr
+            .sessions
+            .get(&session_id)
+            .and_then(|s| s.last_poll_path.clone());
+        let cmd_changed = prev_cmd.as_ref().map(|c| c != &snap.command).unwrap_or(true);
+        let path_changed = prev_path.as_ref().map(|p| p != &snap.path).unwrap_or(true);
+
+        let prev_activity = prev_cmd
+            .as_ref()
+            .map(|c| classify_pane_command(c, &shell));
+        let activity_changed = prev_activity.map(|a| a != activity).unwrap_or(true);
+
+        // Always re-emit Idle (and Tui) so UI can recover from optimistic busy.
+        // Busy only needs emit on change (otherwise spam while builds run).
+        let should_emit = cmd_changed
+            || path_changed
+            || activity_changed
+            || activity == PaneActivity::Idle
+            || activity == PaneActivity::Tui;
+
+        if !should_emit {
+            continue;
+        }
+
+        if let Some(live) = mgr.sessions.get_mut(&session_id) {
+            live.last_poll_cmd = Some(snap.command.clone());
+            if !snap.path.is_empty() {
+                live.last_poll_path = Some(snap.path.clone());
+                let p = PathBuf::from(&snap.path);
+                if p.is_dir() {
+                    live.cwd = p;
+                }
+            }
+        }
+
+        let cwd = mgr
+            .sessions
+            .get(&session_id)
+            .map(|s| s.cwd.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let _ = app.emit(
+            "session-activity",
+            SessionActivityEvent {
+                session_id,
+                activity,
+                command: snap.command,
+                cwd,
+            },
+        );
+    }
+}
+
+/// Background poller: process truth from host-local tmux.
+pub fn start_activity_poller(app: AppHandle) {
+    thread::Builder::new()
+        .name("chatty-tmux-poll".into())
+        .spawn(move || {
+            loop {
+                thread::sleep(Duration::from_millis(350));
+                let state = app.try_state::<AppState>();
+                let Some(state) = state else {
+                    continue;
+                };
+                let Ok(mut mgr) = state.sessions.lock() else {
+                    continue;
+                };
+                poll_tmux_activity(&app, &mut mgr);
+            }
+        })
+        .ok();
 }
 
 /// Session names for @mentions: alphanumeric, `.`, `_`, `-`.
@@ -705,6 +1180,7 @@ fn pty_read_loop_coalesce_drain(
 }
 
 /// Spawn login interactive PTY (blocking). Call from a worker thread.
+/// Prefer host-local tmux so sessions survive Chatty quit (remote SSH never needs tmux).
 pub(crate) fn spawn_interactive_pty_public(
     app: &AppHandle,
     session_id: &str,
@@ -714,40 +1190,7 @@ pub(crate) fn spawn_interactive_pty_public(
     spawn_interactive_pty(app, session_id, shell, cwd)
 }
 
-fn spawn_interactive_pty(
-    app: &AppHandle,
-    session_id: &str,
-    shell: &str,
-    cwd: &PathBuf,
-) -> Result<InteractivePty, String> {
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: DEFAULT_ROWS,
-            cols: DEFAULT_COLS,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| format!("open pty: {e}"))?;
-
-    let mut cmd = CommandBuilder::new(shell);
-    let base = std::path::Path::new(shell)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    // Login + interactive so .zprofile/.zlogin and .zshrc (fastfetch, omz, etc.) load
-    // the same way as a normal terminal emulator.
-    if base.contains("zsh") || base.contains("bash") {
-        cmd.arg("-l");
-        cmd.arg("-i");
-    } else if base.contains("fish") {
-        cmd.arg("-l");
-        cmd.arg("-i");
-    }
-    cmd.cwd(cwd);
-
-    // GUI-launched apps often lack a proper TERM; shells and tools (fastfetch,
-    // starship, colors) misbehave without it.
+fn apply_common_env(cmd: &mut CommandBuilder, shell: &str) {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     if cmd.get_env("HOME").is_none() {
@@ -766,11 +1209,127 @@ fn spawn_interactive_pty(
     if cmd.get_env("SHELL").is_none() {
         cmd.env("SHELL", shell);
     }
+}
+
+fn shell_login_args(shell: &str) -> Vec<String> {
+    let base = std::path::Path::new(shell)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if base.contains("zsh") || base.contains("bash") || base.contains("fish") {
+        vec!["-l".into(), "-i".into()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Hide the default green status bar for a Chatty-owned tmux session only
+/// (`set -t` is session-scoped — does not touch the user's other tmux sessions).
+fn ensure_tmux_status_off(tmux_name: &str) {
+    let Some(tmux) = find_tmux() else {
+        return;
+    };
+    let _ = Command::new(&tmux)
+        .args(["set-option", "-t", tmux_name, "status", "off"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    // Also clear window status / titles noise that redraws the client.
+    let _ = Command::new(&tmux)
+        .args(["set-option", "-t", tmux_name, "set-titles", "off"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Build the PTY child command: tmux new-session -A when available, else bare shell.
+fn build_session_command(
+    session_id: &str,
+    shell: &str,
+    cwd: &PathBuf,
+) -> Result<(CommandBuilder, SessionBackend), String> {
+    let login_args = shell_login_args(shell);
+
+    if let Some(tmux) = find_tmux() {
+        let name = tmux_session_name(session_id);
+        // Existing sessions: strip status bar before the client attaches.
+        // New sessions: this no-ops until after spawn (poller / post-spawn fix it).
+        ensure_tmux_status_off(&name);
+
+        let mut cmd = CommandBuilder::new(&tmux);
+        // Host-local conf (status off). Never used on SSH remotes.
+        // Note: -f only applies when this starts the tmux *server*; session-scoped
+        // set-option is the reliable path for an already-running server.
+        if let Ok(conf) = crate::config::ensure_tmux_conf() {
+            cmd.arg("-f");
+            cmd.arg(conf.as_os_str());
+        }
+        // -A: attach if exists (restore), else create.
+        cmd.arg("new-session");
+        cmd.arg("-A");
+        cmd.arg("-s");
+        cmd.arg(&name);
+        cmd.arg("-c");
+        cmd.arg(cwd.as_os_str());
+        cmd.env("TMUX", "");
+        cmd.arg("--");
+        cmd.arg(shell);
+        for a in &login_args {
+            cmd.arg(a);
+        }
+        apply_common_env(&mut cmd, shell);
+        cmd.cwd(cwd);
+        return Ok((cmd, SessionBackend::Tmux));
+    }
+
+    // Plain fallback — no reattach after Chatty quit.
+    let mut cmd = CommandBuilder::new(shell);
+    for a in &login_args {
+        cmd.arg(a);
+    }
+    cmd.cwd(cwd);
+    apply_common_env(&mut cmd, shell);
+    Ok((cmd, SessionBackend::Plain))
+}
+
+fn spawn_interactive_pty(
+    app: &AppHandle,
+    session_id: &str,
+    shell: &str,
+    cwd: &PathBuf,
+) -> Result<InteractivePty, String> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: DEFAULT_ROWS,
+            cols: DEFAULT_COLS,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("open pty: {e}"))?;
+
+    let (cmd, backend) = build_session_command(session_id, shell, cwd)?;
+    let label = match backend {
+        SessionBackend::Tmux => format!("tmux+{shell}"),
+        SessionBackend::Plain => shell.to_string(),
+    };
 
     let mut child = pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| format!("spawn interactive shell ({shell}): {e}"))?;
+        .map_err(|e| format!("spawn interactive session ({label}): {e}"))?;
+
+    // New sessions inherit global status=on; force off after the session exists.
+    if backend == SessionBackend::Tmux {
+        let name = tmux_session_name(session_id);
+        // Brief delay so new-session finishes creating before set-option.
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(80));
+            ensure_tmux_status_off(&name);
+            thread::sleep(Duration::from_millis(200));
+            ensure_tmux_status_off(&name);
+        });
+    }
 
     let killer = child.clone_killer();
 

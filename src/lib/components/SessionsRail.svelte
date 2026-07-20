@@ -345,10 +345,17 @@
 
 <style>
   .sessions-rail {
+    box-sizing: border-box;
+    /* Width comes from parent grid column (240px); fill the area. */
+    width: 100%;
+    min-width: 0;
     background: var(--bg-panel, #12151c);
     border-left: 1px solid var(--border, #232833);
     color: var(--text, #e8eaed);
     min-height: 0;
+    height: 100%;
+    max-height: 100%;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
   }

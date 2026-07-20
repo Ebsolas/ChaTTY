@@ -50,10 +50,10 @@
     padding: 0.4rem 1rem 0.55rem;
     font-size: 0.8rem;
     font: inherit;
-    color: var(--muted, #8b93a7);
+    color: #e8d9a0;
     border: none;
-    border-top: 1px solid var(--border, #232833);
-    background: color-mix(in srgb, var(--accent, #4c8dff) 8%, var(--bg-panel, #12151c));
+    border-top: 1px solid color-mix(in srgb, var(--idle, #f0b429) 35%, var(--border, #232833));
+    background: color-mix(in srgb, var(--idle, #f0b429) 14%, var(--bg-panel, #12151c));
     text-align: left;
   }
 
@@ -66,6 +66,8 @@
   }
 
   .busy.tui {
+    color: var(--muted, #8b93a7);
+    border-top-color: var(--border, #232833);
     background: color-mix(in srgb, #c792ea 10%, var(--bg-panel, #12151c));
   }
 
@@ -78,15 +80,25 @@
 
   strong {
     font-weight: 600;
+    color: #f5e6b8;
+  }
+
+  .busy.tui strong {
     color: var(--text, #e8eaed);
   }
 
   .cmd {
-    opacity: 0.85;
+    opacity: 0.9;
     max-width: 28rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    color: #e8d9a0;
+  }
+
+  .busy.tui .cmd {
+    color: inherit;
+    opacity: 0.85;
   }
 
   .cmd::before {
@@ -95,7 +107,7 @@
   }
 
   .hint {
-    opacity: 0.7;
+    opacity: 0.75;
     font-size: 0.75rem;
   }
 
@@ -113,7 +125,7 @@
     width: 5px;
     height: 5px;
     border-radius: 50%;
-    background: var(--accent, #4c8dff);
+    background: var(--idle, #f0b429);
     animation: bounce 1.2s infinite ease-in-out;
   }
 

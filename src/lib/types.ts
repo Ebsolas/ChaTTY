@@ -21,6 +21,8 @@ export interface SessionInfo {
   tuiActive?: boolean;
   /** True while the backend is still spawning the PTY. */
   starting?: boolean;
+  /** "tmux" | "plain" when known. */
+  backend?: string;
 }
 
 export interface BackendSessionInfo {
@@ -30,6 +32,8 @@ export interface BackendSessionInfo {
   cwd: string;
   shell: string;
   shellFlavor: string;
+  /** "tmux" | "plain" — host-local only; remotes never need tmux. */
+  backend?: string;
 }
 
 export type MessageRole = "user" | "session";
@@ -67,6 +71,14 @@ export interface SessionExitEvent {
 
 export interface SessionRemovedEvent {
   sessionId: string;
+}
+
+/** From host-local tmux pane_current_command polling. */
+export interface SessionActivityEvent {
+  sessionId: string;
+  activity: SessionActivity;
+  command: string;
+  cwd: string;
 }
 
 export interface RunOutputEvent {

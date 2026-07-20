@@ -62,6 +62,36 @@ pub fn keybindings_path() -> PathBuf {
     config_dir().join("keybindings.json")
 }
 
+pub fn tmux_conf_path() -> PathBuf {
+    config_dir().join("tmux.conf")
+}
+
+/// Ensure a minimal Chatty-specific tmux config exists (status bar off, etc.).
+/// Used only on the Chatty host — never required on SSH remotes.
+pub fn ensure_tmux_conf() -> Result<PathBuf, String> {
+    let dir = config_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
+    let path = tmux_conf_path();
+    // Always rewrite so upgrades pick up defaults (user can edit after; we only
+    // create if missing to avoid clobbering customizations).
+    if !path.is_file() {
+        let conf = r#"# Chatty host-local tmux config (not used on SSH remotes).
+# Outer PTY clients load this via `tmux -f …`.
+
+set -g default-terminal "tmux-256color"
+set -as terminal-features ",xterm-256color:RGB"
+set -g status off
+set -g set-titles off
+set -g mouse on
+set -g history-limit 50000
+set -g escape-time 10
+set -g focus-events on
+"#;
+        fs::write(&path, conf).map_err(|e| format!("write tmux.conf: {e}"))?;
+    }
+    Ok(path)
+}
+
 pub fn load_keybindings() -> KeybindingsPayload {
     let dir = config_dir();
     let path = keybindings_path();
@@ -111,5 +141,117 @@ pub fn ensure_keybindings_example() -> Result<String, String> {
     let text = serde_json::to_string_pretty(&example)
         .map_err(|e| format!("serialize example: {e}"))?;
     fs::write(&path, text + "\n").map_err(|e| format!("write keybindings: {e}"))?;
+    Ok(path.display().to_string())
+}
+
+// ─── App state persistence (sessions + chat history) ─────────────────────────
+
+pub fn state_path() -> PathBuf {
+    config_dir().join("state.json")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSession {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default)]
+    pub shell: String,
+}
+
+/// Opaque chat message blob (frontend-owned shape).
+pub type SavedMessage = serde_json::Value;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppStateFile {
+    #[serde(default = "default_state_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub saved_at: u64,
+    #[serde(default)]
+    pub sticky_session_id: Option<String>,
+    #[serde(default)]
+    pub active_session_id: Option<String>,
+    #[serde(default)]
+    pub expanded_session_id: Option<String>,
+    #[serde(default)]
+    pub sessions: Vec<SavedSession>,
+    #[serde(default)]
+    pub messages: Vec<SavedMessage>,
+}
+
+fn default_state_version() -> u32 {
+    1
+}
+
+impl Default for AppStateFile {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            saved_at: 0,
+            sticky_session_id: None,
+            active_session_id: None,
+            expanded_session_id: None,
+            sessions: Vec::new(),
+            messages: Vec::new(),
+        }
+    }
+}
+
+pub fn load_app_state() -> AppStateFile {
+    let path = state_path();
+    if !path.is_file() {
+        return AppStateFile::default();
+    }
+    match fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<AppStateFile>(&text) {
+            Ok(mut state) => {
+                // Soft cap on load so a huge file can't melt the UI.
+                const MAX_MESSAGES: usize = 500;
+                if state.messages.len() > MAX_MESSAGES {
+                    state.messages = state
+                        .messages
+                        .split_off(state.messages.len() - MAX_MESSAGES);
+                }
+                state
+            }
+            Err(e) => {
+                eprintln!("chatty: invalid state.json: {e}");
+                AppStateFile::default()
+            }
+        },
+        Err(e) => {
+            eprintln!("chatty: could not read state.json: {e}");
+            AppStateFile::default()
+        }
+    }
+}
+
+pub fn save_app_state(mut state: AppStateFile) -> Result<String, String> {
+    let dir = config_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
+
+    const MAX_MESSAGES: usize = 500;
+    if state.messages.len() > MAX_MESSAGES {
+        state.messages = state
+            .messages
+            .split_off(state.messages.len() - MAX_MESSAGES);
+    }
+    state.version = 1;
+    state.saved_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let path = state_path();
+    let text = serde_json::to_string_pretty(&state)
+        .map_err(|e| format!("serialize state: {e}"))?;
+    // Atomic-ish write: temp then rename.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, text + "\n").map_err(|e| format!("write state: {e}"))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("rename state: {e}"))?;
     Ok(path.display().to_string())
 }

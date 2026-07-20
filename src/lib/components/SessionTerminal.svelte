@@ -41,6 +41,12 @@
     let cancelled = false;
     let writeBuf = "";
     let writeScheduled = false;
+    /**
+     * While replaying scrollback, xterm parses historical CSI/OSC queries
+     * (DA, CPR, color queries, …) and fires onData with *responses*.
+     * If we forward those to the PTY, they land as garbage on the shell line.
+     */
+    let acceptInput = false;
 
     const flushWrite = () => {
       writeScheduled = false;
@@ -56,6 +62,24 @@
       if (writeScheduled) return;
       writeScheduled = true;
       requestAnimationFrame(flushWrite);
+    };
+
+    const finishOpen = () => {
+      if (cancelled || !term) return;
+      try {
+        fit?.fit();
+      } catch {
+        /* ignore */
+      }
+      void pushSize().finally(() => {
+        if (cancelled || !term) return;
+        // Let any deferred onData from the last history write settle first.
+        setTimeout(() => {
+          if (cancelled || !term) return;
+          acceptInput = true;
+          term.focus();
+        }, 40);
+      });
     };
 
     const boot = () => {
@@ -89,6 +113,18 @@
       term.loadAddon(fit);
       term.open(host);
 
+      // Register early but gate with acceptInput (see above).
+      term.onData((data) => {
+        if (!acceptInput || cancelled) return;
+        void sendRawToSession(boundSessionId, data).catch(console.error);
+      });
+
+      unsubRaw = subscribeRawOutput((id, chunk) => {
+        if (id !== boundSessionId || !term) return;
+        // Buffer live output even during history replay so we don't miss bytes.
+        queueWrite(chunk);
+      });
+
       const history = getPtyScrollback(boundSessionId);
       if (history) {
         const CHUNK = 16_384;
@@ -96,36 +132,29 @@
         const pump = () => {
           if (cancelled || !term) return;
           if (offset >= history.length) {
-            fit?.fit();
-            void pushSize();
-            term.focus();
+            // One more frame so any onData from the last write is dropped.
+            requestAnimationFrame(() => {
+              if (!cancelled) finishOpen();
+            });
             return;
           }
-          term.write(history.slice(offset, offset + CHUNK));
-          offset += CHUNK;
-          requestAnimationFrame(pump);
+          // write() is async internally; chain chunks so query responses
+          // from earlier chunks still fall under acceptInput === false.
+          term.write(history.slice(offset, offset + CHUNK), () => {
+            offset += CHUNK;
+            requestAnimationFrame(pump);
+          });
         };
         requestAnimationFrame(pump);
       } else {
-        fit.fit();
-        void pushSize();
-        term.focus();
+        finishOpen();
       }
-
-      // Keys always go to the session this terminal was opened for.
-      term.onData((data) => {
-        void sendRawToSession(boundSessionId, data).catch(console.error);
-      });
-
-      unsubRaw = subscribeRawOutput((id, chunk) => {
-        if (id !== boundSessionId || !term) return;
-        queueWrite(chunk);
-      });
 
       let resizeTimer: ReturnType<typeof setTimeout> | null = null;
       ro = new ResizeObserver(() => {
         if (resizeTimer) clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => {
+          if (!acceptInput) return; // ignore layout thrash during open
           try {
             fit?.fit();
             void pushSize();
@@ -149,6 +178,7 @@
 
     return () => {
       cancelled = true;
+      acceptInput = false;
       cancelAnimationFrame(bootRaf);
       window.removeEventListener("keydown", onKey, true);
     };
@@ -202,11 +232,14 @@
 
 <style>
   .overlay {
-    position: absolute;
-    inset: 0;
-    z-index: 20;
+    /* Placed by parent grid (chatTop + sessionRail). Not position:absolute. */
+    z-index: 30;
     display: grid;
-    grid-template-rows: auto 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    min-height: 0;
+    min-width: 0;
+    height: 100%;
+    width: 100%;
     background: #0d1017;
     border-right: 1px solid var(--border, #232833);
   }

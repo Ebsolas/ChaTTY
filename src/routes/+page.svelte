@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { get } from "svelte/store";
   import { invoke } from "@tauri-apps/api/core";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import BusyIndicator from "$lib/components/BusyIndicator.svelte";
   import ChatView from "$lib/components/ChatView.svelte";
   import Composer from "$lib/components/Composer.svelte";
@@ -30,6 +31,7 @@
     createSession,
     initSessionBridge,
     openExpandedSession,
+    persistAppStateNow,
     renameSession,
     sendCommand,
     sendControlToTargets,
@@ -40,9 +42,23 @@
   let booting = $state(true);
   let creatingSession = $state(false);
   let renameTargetId = $state<string | null>(null);
+  /** Prevent re-entrant close handling while we confirm/save/destroy. */
+  let closingApp = $state(false);
+
+  function activeBlockingSessions() {
+    return get(sessions).filter(
+      (s) =>
+        s.activity === "busy" ||
+        s.activity === "tui" ||
+        !!s.tuiActive ||
+        get(activeTurns).has(s.id),
+    );
+  }
 
   onMount(() => {
     let cancelled = false;
+    let unlistenClose: (() => void) | undefined;
+
     void (async () => {
       try {
         // Load keybindings before (or alongside) session boot.
@@ -68,6 +84,57 @@
         if (!cancelled) bootError = String(err);
       } finally {
         if (!cancelled) booting = false;
+      }
+
+      // Intercept window close (titlebar X, Super+Q, etc.). beforeunload is
+      // unreliable in Tauri/WebKitGTK.
+      try {
+        const win = getCurrentWindow();
+        unlistenClose = await win.onCloseRequested(async (event) => {
+          if (closingApp) return;
+          event.preventDefault();
+
+          const blocking = activeBlockingSessions();
+          if (blocking.length > 0) {
+            const names = blocking
+              .map((s) => {
+                const kind =
+                  s.activity === "tui" || s.tuiActive
+                    ? "TUI"
+                    : s.activity === "busy"
+                      ? "busy"
+                      : "active";
+                return `@${s.name} (${kind})`;
+              })
+              .join(", ");
+            const ok = window.confirm(
+              `${blocking.length} session(s) still active:\n${names}\n\n` +
+                `Quit anyway? Local shells and TUIs will be killed. Chat history will be saved.`,
+            );
+            if (!ok) return;
+          }
+
+          closingApp = true;
+          try {
+            await persistAppStateNow();
+          } catch (err) {
+            console.error("persist on quit failed", err);
+          }
+          try {
+            await win.destroy();
+          } catch (err) {
+            console.error("destroy window failed", err);
+            // Fallback: try close()
+            try {
+              await win.close();
+            } catch {
+              /* ignore */
+            }
+            closingApp = false;
+          }
+        });
+      } catch (err) {
+        console.error("onCloseRequested setup failed", err);
       }
     })();
 
@@ -128,6 +195,7 @@
     return () => {
       cancelled = true;
       window.removeEventListener("keydown", onKeydown, true);
+      unlistenClose?.();
       void teardownSessionBridge();
     };
   });
@@ -219,6 +287,12 @@
   }
 
   function handleOpenSession(id: string) {
+    // Stuck state: expanded id set but session missing → clear and open.
+    const list = get(sessions);
+    if (!list.some((s) => s.id === id)) {
+      closeExpandedSession();
+      return;
+    }
     if (get(expandedSessionId) === id) {
       closeExpandedSession();
       return;
@@ -244,6 +318,7 @@
   async function handleCloseSession(id: string) {
     try {
       if (renameTargetId === id) renameTargetId = null;
+      // closeSession shows warn toasts for busy/TUI; only real errors go red.
       await closeSession(id);
     } catch (err) {
       backendError.set(String(err));
@@ -354,11 +429,6 @@
 
       <div class="chat-body">
         <ChatView messages={$messages} onOpenSession={handleOpenSession} />
-        {#if expandedSession}
-          {#key expandedSession.id}
-            <SessionTerminal sessionId={expandedSession.id} sessionName={expandedSession.name} />
-          {/key}
-        {/if}
         <ToastStack />
       </div>
 
@@ -391,6 +461,13 @@
         renameTargetId = null;
       }}
     />
+
+    <!-- Overlay spans middle grid band (chat + rail), not composer -->
+    {#if expandedSession}
+      {#key expandedSession.id}
+        <SessionTerminal sessionId={expandedSession.id} sessionName={expandedSession.name} />
+      {/key}
+    {/if}
   </main>
 
   <Composer
@@ -400,25 +477,80 @@
 </div>
 
 <style>
+  /*
+   * Desktop shell: definite viewport height + named grid.
+   * Composer is the bottom row (not position:sticky). Rail is the right column.
+   *
+   *   "top"      "top"
+   *   "chatTop"  "sessionRail"
+   *   "composer" "composer"
+   */
   .app {
-    display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto;
-    /* Fill the Tauri webview even if intermediate wrappers lack height */
     position: fixed;
     inset: 0;
     width: 100%;
-    height: 100%;
+    height: 100vh;
+    overflow: hidden;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 240px;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "top      top"
+      "chatTop  sessionRail"
+      "composer composer";
     background: var(--bg, #0f1115);
     color: var(--text, #e8eaed);
   }
 
   .topbar {
+    grid-area: top;
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--border, #232833);
     background: var(--bg-panel, #12151c);
+  }
+
+  /* Children of .shell become .app grid items */
+  .shell {
+    display: contents;
+  }
+
+  .chat-pane {
+    grid-area: chatTop;
+    position: relative;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg, #0f1115);
+  }
+
+  /* SessionsRail root is <aside class="sessions-rail"> */
+  .shell > :global(aside.sessions-rail),
+  .shell > :global(aside) {
+    grid-area: sessionRail;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+    z-index: 2;
+  }
+
+  /* Session terminal: middle row, both columns (chat + rail only) */
+  .shell > :global(.overlay) {
+    grid-row: 2;
+    grid-column: 1 / -1;
+    z-index: 30;
+    min-height: 0;
+    min-width: 0;
+  }
+
+  /* Composer root is .composer-wrap from the child component */
+  .app > :global(.composer-wrap) {
+    grid-area: composer;
+    min-width: 0;
   }
 
   .brand {
@@ -458,29 +590,13 @@
     box-shadow: 0 0 8px color-mix(in srgb, var(--ok, #3dd68c) 60%, transparent);
   }
 
-  .shell {
-    position: relative;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 240px;
-    min-height: 0;
-    overflow: hidden;
-  }
-
-  .chat-pane {
-    position: relative;
-    min-height: 0;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    background: var(--bg, #0f1115);
-  }
-
   .chat-body {
     position: relative;
-    flex: 1;
+    flex: 1 1 0;
     min-height: 0;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
     background: var(--bg, #0f1115);
   }
 

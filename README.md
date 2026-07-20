@@ -75,4 +75,27 @@ npm run tauri dev
 
 Composer **↑ / ↓** recalls command history (persisted in localStorage). Each session has its own chat capture, so a TUI or long job on `@local` does not block `@local-2`.
 
-Deferred: branching UI, SSH, Windows/pwsh, job-runner exec channel.
+### Persistence
+
+On quit/restart Chatty restores session **names, order, cwd, sticky target, and chat history** from:
+
+```text
+~/.config/chatty/state.json
+```
+
+**Session hosting (this machine only):**
+
+| Host has `tmux` | Behavior |
+|-----------------|----------|
+| **Yes** | Each session is `tmux new-session -A -s chatty-<id> …` with `~/.config/chatty/tmux.conf` (status bar off). Quit Chatty **detaches**; htop/builds stay alive. Reopen Chatty **reattaches**. Closing a session in the rail runs `tmux kill-session` (confirm if busy/TUI). |
+| **No** | Plain login PTY (no reattach). Install tmux on the **Chatty host** for durable sessions. |
+
+**SSH remotes never need tmux.** Future SSH sessions run `ssh` *inside* host-local tmux; only this machine needs the dependency.
+
+**Activity (busy / TUI)** on tmux sessions comes from `pane_current_command` (poll), not stream heuristics — so status-bar redraws no longer lock sessions. Chat turns seal when the foreground process returns to the shell (with a quiet-timeout backup for very fast commands).
+
+Host-local `~/.config/chatty/tmux.conf` turns the status bar off; Chatty also forces `status off` per `chatty-*` session so existing sessions lose the green bar without touching your other tmux sessions.
+
+Closing a session that is **busy** or in a **TUI** is blocked with a warning until the job/UI exits (or you force-close later).
+
+Deferred: branching UI, SSH, Windows/pwsh, force-close busy/TUI, job-runner exec channel.

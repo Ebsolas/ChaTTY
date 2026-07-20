@@ -2,8 +2,8 @@ mod config;
 mod session;
 mod shell;
 
-use config::KeybindingsPayload;
-use session::{AppState, SessionInfo, DEFAULT_SESSION_NAME};
+use config::{AppStateFile, KeybindingsPayload};
+use session::{host_session_backend, AppState, SessionInfo, DEFAULT_SESSION_NAME};
 use std::path::PathBuf;
 use tauri::State;
 
@@ -25,6 +25,23 @@ fn ensure_keybindings_config() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn load_app_state() -> AppStateFile {
+    config::load_app_state()
+}
+
+/// Session hosting mode on this machine: "tmux" | "plain".
+/// tmux is never required on SSH remotes — only on the Chatty host.
+#[tauri::command]
+fn session_host_backend() -> String {
+    host_session_backend().as_str().to_string()
+}
+
+#[tauri::command]
+fn save_app_state(state: AppStateFile) -> Result<String, String> {
+    config::save_app_state(state)
+}
+
+#[tauri::command]
 fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, String> {
     let mgr = state
         .sessions
@@ -35,39 +52,41 @@ fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, String>
 
 /// Create a session without holding the manager lock during fork/exec.
 ///
-/// 1. Reserve name/id under a short lock and emit `session-created` (UI paints).
-/// 2. Spawn the login PTY on a blocking pool thread.
-/// 3. Attach the PTY and return.
+/// Optional `id` / `cwd` are used when restoring saved sessions.
 #[tauri::command]
 async fn create_session(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     name: Option<String>,
+    id: Option<String>,
+    cwd: Option<String>,
 ) -> Result<SessionInfo, String> {
-    create_session_async(app, state, name).await
+    create_session_async(app, state, name, id, cwd).await
 }
 
 async fn create_session_async(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     name: Option<String>,
+    id: Option<String>,
+    cwd: Option<String>,
 ) -> Result<SessionInfo, String> {
     let reserved = {
         let mut mgr = state
             .sessions
             .lock()
             .map_err(|_| "session lock poisoned".to_string())?;
-        mgr.begin_create(&app, name)?
+        mgr.begin_create(&app, name, id, cwd)?
     };
 
-    let id = reserved.id.clone();
+    let sid = reserved.id.clone();
     let shell = reserved.shell.clone();
-    let cwd = PathBuf::from(&reserved.cwd);
+    let cwd_path = PathBuf::from(&reserved.cwd);
     let app_spawn = app.clone();
-    let id_spawn = id.clone();
+    let id_spawn = sid.clone();
 
     let spawn_result = tauri::async_runtime::spawn_blocking(move || {
-        session::spawn_interactive_pty_public(&app_spawn, &id_spawn, &shell, &cwd)
+        session::spawn_interactive_pty_public(&app_spawn, &id_spawn, &shell, &cwd_path)
     })
     .await
     .map_err(|e| format!("spawn task failed: {e}"))?;
@@ -78,14 +97,14 @@ async fn create_session_async(
                 .sessions
                 .lock()
                 .map_err(|_| "session lock poisoned".to_string())?;
-            mgr.finish_create(&id, pty)
+            mgr.finish_create(&sid, pty)
         }
         Err(e) => {
             let mut mgr = state
                 .sessions
                 .lock()
                 .map_err(|_| "session lock poisoned".to_string())?;
-            mgr.abort_create(&app, &id);
+            mgr.abort_create(&app, &sid);
             Err(e)
         }
     }
@@ -107,7 +126,14 @@ async fn ensure_local_session(
             }
         }
     }
-    create_session_async(app, state, Some(DEFAULT_SESSION_NAME.to_string())).await
+    create_session_async(
+        app,
+        state,
+        Some(DEFAULT_SESSION_NAME.to_string()),
+        None,
+        None,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -197,10 +223,18 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::new())
+        .setup(|app| {
+            // Host-local tmux activity poll (process-level busy/TUI/cwd).
+            session::start_activity_poller(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             get_keybindings,
             ensure_keybindings_config,
+            load_app_state,
+            save_app_state,
+            session_host_backend,
             list_sessions,
             create_session,
             ensure_local_session,

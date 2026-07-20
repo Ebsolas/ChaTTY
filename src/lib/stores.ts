@@ -165,6 +165,7 @@ export function backendToSession(
     activity: "idle",
     tuiActive: false,
     starting,
+    backend: info.backend,
   };
 }
 
@@ -247,12 +248,68 @@ export function setSessionActivity(
         ? {
             ...s,
             activity,
-            tuiActive: activity === "tui" ? true : activity === "idle" ? false : s.tuiActive,
+            // Activity is authoritative (esp. tmux poll); don't leave stale tuiActive on busy/idle.
+            tuiActive: activity === "tui",
             lastCommand: lastCommand !== undefined ? lastCommand : s.lastCommand,
+            cwd: s.cwd,
           }
         : s,
     ),
   );
+}
+
+/** Apply tmux (or other) activity poll: activity + optional cwd. */
+export function applySessionActivityPoll(
+  sessionId: string,
+  activity: SessionActivity,
+  command: string,
+  cwd?: string,
+) {
+  let activityChanged = false;
+  sessions.update((list) => {
+    let changed = false;
+    const next = list.map((s) => {
+      if (s.id !== sessionId) return s;
+      const nextCmd =
+        activity === "idle" ? s.lastCommand : command || s.lastCommand;
+      const nextCwd = cwd && cwd.length > 0 ? cwd : s.cwd;
+      const nextTui = activity === "tui";
+      if (
+        s.activity === activity &&
+        s.tuiActive === nextTui &&
+        s.lastCommand === nextCmd &&
+        s.cwd === nextCwd
+      ) {
+        return s;
+      }
+      changed = true;
+      if (s.activity !== activity) activityChanged = true;
+      return {
+        ...s,
+        activity,
+        tuiActive: nextTui,
+        lastCommand: nextCmd,
+        cwd: nextCwd,
+      };
+    });
+    return changed ? next : list;
+  });
+  // Only touch alt-screen set when TUI membership might change.
+  if (activity === "tui") {
+    altScreenSessions.update((set) => {
+      if (set.has(sessionId)) return set;
+      const next = new Set(set);
+      next.add(sessionId);
+      return next;
+    });
+  } else if (activityChanged || activity === "idle" || activity === "busy") {
+    altScreenSessions.update((set) => {
+      if (!set.has(sessionId)) return set;
+      const next = new Set(set);
+      next.delete(sessionId);
+      return next;
+    });
+  }
 }
 
 export function setSessionTui(sessionId: string, tuiActive: boolean) {

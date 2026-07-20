@@ -39,9 +39,12 @@
 
 <style>
   .chat {
-    flex: 1;
+    flex: 1 1 0;
     min-height: 0;
+    height: 100%;
+    overflow-x: hidden;
     overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 1rem 1.1rem 1.25rem;
     display: flex;
     flex-direction: column;

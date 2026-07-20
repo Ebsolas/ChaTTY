@@ -318,6 +318,10 @@
 <style>
   .composer-wrap {
     position: relative;
+    /* grid-area: composer is set by +page.svelte parent */
+    z-index: 10;
+    width: 100%;
+    min-width: 0;
     background: var(--bg-panel, #12151c);
     color: var(--text, #e8eaed);
     border-top: 1px solid var(--border, #232833);

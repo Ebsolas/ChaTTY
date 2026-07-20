@@ -7,12 +7,21 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { get } from "svelte/store";
 import { parseComposer, parseLeadingMentions } from "./mentions";
-import { looksLikeTuiNoise, resetAltScreenCarry, scanAltScreen } from "./termDetect";
+import {
+  flushSaveAppState,
+  loadAppState,
+  normalizeLoadedMessages,
+  pausePersistence,
+  resumePersistence,
+  scheduleSaveAppState,
+} from "./persistence";
+import { resetAltScreenCarry, scanAltScreen } from "./termDetect";
 import {
   activeSessionId,
   activeTurns,
   altScreenSessions,
   appendUserMessage,
+  applySessionActivityPoll,
   applySessionRename,
   backendError,
   backendToSession,
@@ -21,6 +30,7 @@ import {
   formatPtyCapture,
   getSessionTurn,
   markSessionReady,
+  messages,
   MIN_AFTER_FIRST_CHUNK_MS,
   openSessionBubble,
   patchSessionTurn,
@@ -41,6 +51,7 @@ import {
 } from "./stores";
 import type {
   BackendSessionInfo,
+  SessionActivityEvent,
   SessionExitEvent,
   SessionInfo,
   SessionOutputEvent,
@@ -49,12 +60,15 @@ import type {
 } from "./types";
 
 const unlistens: UnlistenFn[] = [];
+const storeUnsubs: Array<() => void> = [];
 const ptyScrollback = new Map<string, string>();
 const SCROLLBACK_MAX = 500_000;
 
 /** Per-session quiet / max seal timers (independent captures). */
 const quietTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const maxTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Tmux: session ids whose turn has observed a non-shell pane process. */
+const turnSawProcess = new Set<string>();
 
 type RawListener = (sessionId: string, chunk: string) => void;
 const rawListeners = new Set<RawListener>();
@@ -116,16 +130,17 @@ function appendPty(sessionId: string, text: string) {
   if (next.length > SCROLLBACK_MAX) next = next.slice(next.length - SCROLLBACK_MAX);
   ptyScrollback.set(sessionId, next);
 
-  // --- TUI / alternate screen detection (per session, sticky until leave CSI) ---
-  let alt = scanAltScreen(sessionId, text);
-  // Heuristic: dense redraws with no CSI yet still mean a full-screen app.
-  if (alt === null && !get(altScreenSessions).has(sessionId) && looksLikeTuiNoise(text)) {
-    alt = "enter";
-  }
-  if (alt === "enter") {
-    enterTuiMode(sessionId);
-  } else if (alt === "leave") {
-    leaveTuiMode(sessionId);
+  // CSI alt-screen only for plain (non-tmux) backends. Tmux sessions use
+  // pane_current_command polling as the source of truth for busy/TUI.
+  const sess = get(sessions).find((s) => s.id === sessionId);
+  const tmuxBacked = sess?.backend === "tmux";
+  if (!tmuxBacked) {
+    const alt = scanAltScreen(sessionId, text);
+    if (alt === "enter") {
+      enterTuiMode(sessionId);
+    } else if (alt === "leave") {
+      leaveTuiMode(sessionId);
+    }
   }
 
   notifyRawListeners(sessionId, text);
@@ -133,7 +148,12 @@ function appendPty(sessionId: string, text: string) {
   const turn = getSessionTurn(sessionId);
   if (!turn) return;
   // Don't accumulate TUI framebuffer noise into the chat capture.
-  if (turn.pausedForTui || get(altScreenSessions).has(sessionId)) return;
+  const inTui =
+    turn.pausedForTui ||
+    get(altScreenSessions).has(sessionId) ||
+    sess?.activity === "tui" ||
+    !!sess?.tuiActive;
+  if (inTui) return;
 
   const now = Date.now();
   const raw = turn.raw + text;
@@ -199,8 +219,15 @@ function clearAllTimers() {
 function scheduleQuietSeal(sessionId: string) {
   const prev = quietTimers.get(sessionId);
   if (prev) clearTimeout(prev);
-  // Never schedule quiet seals against a known TUI session.
+  // Never quiet-seal while a full-screen TUI owns this session.
   if (get(altScreenSessions).has(sessionId)) return;
+  const sess = get(sessions).find((s) => s.id === sessionId);
+  if (sess?.activity === "tui") return;
+
+  // Tmux: quiet seal is backup — process poll is primary. Slightly longer delay
+  // so we don't seal mid-command when poll briefly lags.
+  const isTmux = sess?.backend === "tmux";
+  const delay = isTmux ? Math.max(QUIET_MS, 800) : QUIET_MS;
 
   quietTimers.set(
     sessionId,
@@ -208,13 +235,43 @@ function scheduleQuietSeal(sessionId: string) {
       const turn = getSessionTurn(sessionId);
       if (!turn) return;
 
-      // Never quiet-seal while a full-screen TUI owns this session.
-      if (turn.pausedForTui || get(altScreenSessions).has(sessionId)) {
+      const live = get(sessions).find((s) => s.id === sessionId);
+      if (
+        turn.pausedForTui ||
+        get(altScreenSessions).has(sessionId) ||
+        live?.activity === "tui"
+      ) {
         return;
+      }
+
+      // Tmux + poll says idle (or never left idle after grace) → seal.
+      // Avoids stuck "busy" when PTY keep-alives keep resetting quiet timers.
+      if (isTmux || live?.backend === "tmux") {
+        const age = Date.now() - turn.startedAt;
+        if (live?.activity === "idle" && age >= 700) {
+          sealTurn(sessionId, "ok");
+          clearTimers(sessionId);
+          turnSawProcess.delete(sessionId);
+          return;
+        }
+        if (live?.activity === "busy" && age >= 900 && !turnSawProcess.has(sessionId)) {
+          // Optimistic busy but poll never confirmed a process → clear.
+          sealTurn(sessionId, "ok");
+          clearTimers(sessionId);
+          turnSawProcess.delete(sessionId);
+          return;
+        }
       }
 
       // Wait until we've actually received PTY data for this turn.
       if (!turn.sawChunk || turn.firstChunkAt == null) {
+        // Fast no-output commands: seal after a bit anyway on tmux.
+        if (live?.backend === "tmux" && Date.now() - turn.startedAt > 1200) {
+          sealTurn(sessionId, "ok");
+          clearTimers(sessionId);
+          turnSawProcess.delete(sessionId);
+          return;
+        }
         scheduleQuietSeal(sessionId);
         return;
       }
@@ -232,31 +289,46 @@ function scheduleQuietSeal(sessionId: string) {
         return;
       }
 
+      // Cap how long continuous PTY noise can postpone a seal on tmux.
+      if (live?.backend === "tmux" && Date.now() - turn.startedAt > 2500 && live.activity === "idle") {
+        sealTurn(sessionId, "ok");
+        clearTimers(sessionId);
+        turnSawProcess.delete(sessionId);
+        return;
+      }
+
       sealTurn(sessionId, "ok");
       clearTimers(sessionId);
-    }, QUIET_MS),
+      turnSawProcess.delete(sessionId);
+    }, delay),
   );
 }
 
 function armMaxTimer(sessionId: string, turnId: string) {
   const prev = maxTimers.get(sessionId);
   if (prev) clearTimeout(prev);
-  // TUIs (htop, ranger, …) can run indefinitely — no hard deadline.
-  if (get(altScreenSessions).has(sessionId)) return;
+  const sess = get(sessions).find((s) => s.id === sessionId);
+  // Tmux: process poll seals turns; keep a long safety max only.
+  // TUIs can run indefinitely — no hard deadline while marked tui.
+  if (get(altScreenSessions).has(sessionId) || sess?.activity === "tui") return;
 
+  const maxMs = sess?.backend === "tmux" ? TURN_MAX_MS : TURN_MAX_MS;
   maxTimers.set(
     sessionId,
     setTimeout(() => {
       const t = getSessionTurn(sessionId);
       if (!t || t.turnId !== turnId) return;
-      // Re-check: entered TUI after the timer was armed.
-      if (t.pausedForTui || get(altScreenSessions).has(sessionId)) {
+      if (
+        t.pausedForTui ||
+        get(altScreenSessions).has(sessionId) ||
+        get(sessions).find((s) => s.id === sessionId)?.activity === "tui"
+      ) {
         clearTimers(sessionId);
         return;
       }
       sealTurn(sessionId, "ok");
       clearTimers(sessionId);
-    }, TURN_MAX_MS),
+    }, maxMs),
   );
 }
 
@@ -275,6 +347,7 @@ function startTurnCapture(
     sealTurn(session.id, "ok");
     clearTimers(session.id);
   }
+  turnSawProcess.delete(session.id);
 
   const turnId = crypto.randomUUID();
   appendUserMessage(display, session.id, session.name, turnId);
@@ -311,26 +384,127 @@ function startTurnCapture(
 }
 
 export async function initSessionBridge(): Promise<void> {
-  await teardownSessionBridge();
+  // Pause autosave while we tear down / rebuild so we never write empty sessions.
+  pausePersistence();
+  await teardownSessionBridge({ persist: false });
   backendError.set(null);
   ptyScrollback.clear();
   termLineBuf.clear();
+  messages.set([]);
+  sessions.set([]);
+  expandedSessionId.set(null);
+  altScreenSessions.set(new Set());
 
   try {
-    const info = await invoke<BackendSessionInfo>("ensure_local_session");
-    const session = backendToSession(info);
-    upsertSession(session);
-    activeSessionId.set(session.id);
-    stickySessionId.set(session.id);
-    const listed = await invoke<BackendSessionInfo[]>("list_sessions");
-    sessions.set(listed.map((s) => backendToSession(s)));
+    // Listeners first so we never miss spawn output during restore.
+    await attachSessionListeners();
+
+    const saved = await loadAppState();
+    if (saved?.sessions?.length) {
+      const failures: string[] = [];
+      // Sequential spawn keeps login shells from thrashing the machine,
+      // but always finish the full list (don't abort on one failure).
+      for (const s of saved.sessions) {
+        try {
+          const info = await invoke<BackendSessionInfo>("create_session", {
+            name: s.name ?? null,
+            id: s.id ?? null,
+            cwd: s.cwd ? s.cwd : null,
+          });
+          const session = backendToSession(info, { starting: false });
+          upsertSession(session);
+          markSessionReady(session.id);
+        } catch (err) {
+          console.error("restore session failed", s, err);
+          failures.push(s.name || s.id || "?");
+        }
+      }
+
+      const listed = await invoke<BackendSessionInfo[]>("list_sessions");
+      if (listed.length === 0) {
+        await bootDefaultSession();
+      } else {
+        // Preserve restore order from disk, not backend map order.
+        const byId = new Map(listed.map((s) => [s.id, backendToSession(s)]));
+        const ordered: SessionInfo[] = [];
+        for (const s of saved.sessions) {
+          const live = byId.get(s.id);
+          if (live) ordered.push(live);
+        }
+        for (const s of listed) {
+          if (!ordered.some((o) => o.id === s.id)) {
+            ordered.push(backendToSession(s));
+          }
+        }
+        sessions.set(ordered);
+
+        const ids = new Set(ordered.map((s) => s.id));
+        const sticky =
+          (saved.stickySessionId && ids.has(saved.stickySessionId)
+            ? saved.stickySessionId
+            : null) ??
+          ordered[0]?.id ??
+          null;
+        const active =
+          (saved.activeSessionId && ids.has(saved.activeSessionId)
+            ? saved.activeSessionId
+            : null) ?? sticky;
+        stickySessionId.set(sticky);
+        activeSessionId.set(active);
+        messages.set(normalizeLoadedMessages(saved.messages ?? []));
+
+        // Re-open session terminal if it was open last time.
+        const expanded =
+          saved.expandedSessionId && ids.has(saved.expandedSessionId)
+            ? saved.expandedSessionId
+            : null;
+        if (expanded) {
+          openExpandedSession(expanded);
+        }
+
+        if (failures.length) {
+          pushToast(
+            "warn",
+            `Could not restore: ${failures.map((n) => `@${n}`).join(", ")}`,
+          );
+        }
+      }
+    } else {
+      await bootDefaultSession();
+    }
     connected.set(true);
+
+    // Host-local backend: tmux enables reattach after quit (not required on SSH remotes).
+    try {
+      const backend = await invoke<string>("session_host_backend");
+      if (backend === "plain") {
+        pushToast(
+          "info",
+          "tmux not found on this machine — sessions won't reattach after quit. Install tmux on the Chatty host for durable sessions.",
+        );
+      }
+    } catch {
+      /* ignore */
+    }
   } catch (err) {
     backendError.set(String(err));
     connected.set(false);
+    resumePersistence();
     throw err;
   }
 
+  // Debounced persistence of sessions + chat history.
+  storeUnsubs.push(sessions.subscribe(() => scheduleSaveAppState()));
+  storeUnsubs.push(messages.subscribe(() => scheduleSaveAppState()));
+  storeUnsubs.push(stickySessionId.subscribe(() => scheduleSaveAppState()));
+  storeUnsubs.push(activeSessionId.subscribe(() => scheduleSaveAppState()));
+  storeUnsubs.push(expandedSessionId.subscribe(() => scheduleSaveAppState()));
+  resumePersistence();
+  // Capture restored state promptly.
+  scheduleSaveAppState(300);
+}
+
+async function attachSessionListeners(): Promise<void> {
   // Early paint: backend emits this as soon as the slot is reserved (before fork/exec).
   unlistens.push(
     await listen<BackendSessionInfo>("session-created", (event) => {
@@ -369,6 +543,7 @@ export async function initSessionBridge(): Promise<void> {
   unlistens.push(
     await listen<SessionRemovedEvent>("session-removed", (event) => {
       forgetSessionLocally(event.payload.sessionId);
+      scheduleSaveAppState();
     }),
   );
 
@@ -376,8 +551,104 @@ export async function initSessionBridge(): Promise<void> {
     await listen<BackendSessionInfo>("session-renamed", (event) => {
       const { id, name } = event.payload;
       if (id && name) applySessionRename(id, name);
+      scheduleSaveAppState();
     }),
   );
+
+  // Host-local tmux: process-level busy/TUI/cwd (source of truth for inject/close).
+  unlistens.push(
+    await listen<SessionActivityEvent>("session-activity", (event) => {
+      handleTmuxActivity(event.payload);
+    }),
+  );
+}
+
+function handleTmuxActivity(ev: SessionActivityEvent) {
+  const { sessionId, activity, command, cwd } = ev;
+
+  const turn = getSessionTurn(sessionId);
+  const age = turn ? Date.now() - turn.startedAt : 0;
+
+  // After Enter the pane still shows the shell for a beat. Don't clear the
+  // optimistic "busy" indicator until the process had a chance to appear —
+  // unless we already saw a non-shell process earlier in this turn.
+  if (
+    activity === "idle" &&
+    turn &&
+    age < 450 &&
+    !turnSawProcess.has(sessionId) &&
+    !turn.pausedForTui
+  ) {
+    if (cwd && cwd.length > 0) {
+      // cwd-only touch without flipping activity
+      applySessionActivityPoll(sessionId, "busy", turn.command, cwd);
+    }
+    return;
+  }
+
+  applySessionActivityPoll(sessionId, activity, command, cwd);
+
+  if (activity === "tui") {
+    turnSawProcess.add(sessionId);
+    if (turn && !turn.pausedForTui) {
+      patchSessionTurn(sessionId, { pausedForTui: true });
+      clearTimers(sessionId);
+      updateTurnBubble(turn.messageId, "[interactive UI running — open session view]", {
+        open: true,
+        turnStatus: "tui",
+      });
+    }
+    return;
+  }
+
+  if (activity === "busy") {
+    turnSawProcess.add(sessionId);
+    if (turn?.pausedForTui) {
+      patchSessionTurn(sessionId, { pausedForTui: false });
+    }
+    // Keep quiet-seal armed; it acts as backup if we miss the idle transition.
+    return;
+  }
+
+  // idle — shell is foreground again → clear busy indicator and seal open turns
+  if (!turn) {
+    turnSawProcess.delete(sessionId);
+    return;
+  }
+  // Seal once we've either seen a real process, got output, or waited long
+  // enough that a fast command must have finished (poll re-emits idle).
+  const fastDone =
+    turn.sawChunk &&
+    turn.firstChunkAt != null &&
+    Date.now() - turn.firstChunkAt >= MIN_AFTER_FIRST_CHUNK_MS;
+  const waitedOut = age >= 700;
+  if (
+    !turnSawProcess.has(sessionId) &&
+    !turn.pausedForTui &&
+    !fastDone &&
+    !waitedOut
+  ) {
+    return;
+  }
+  if (turn.pausedForTui) {
+    sealTurn(sessionId, "tui");
+  } else {
+    sealTurn(sessionId, "ok");
+  }
+  clearTimers(sessionId);
+  turnSawProcess.delete(sessionId);
+}
+
+async function bootDefaultSession() {
+  const info = await invoke<BackendSessionInfo>("ensure_local_session");
+  const session = backendToSession(info);
+  upsertSession(session);
+  activeSessionId.set(session.id);
+  stickySessionId.set(session.id);
+  expandedSessionId.set(null);
+  const listed = await invoke<BackendSessionInfo[]>("list_sessions");
+  sessions.set(listed.map((s) => backendToSession(s)));
+  messages.set([]);
 }
 
 /** Drop frontend bookkeeping for a session (PTY scrollback, turns, stores). */
@@ -402,6 +673,8 @@ function forgetSessionLocally(sessionId: string) {
 export async function createSession(name?: string): Promise<SessionInfo> {
   const info = await invoke<BackendSessionInfo>("create_session", {
     name: name?.trim() ? name.trim() : null,
+    id: null,
+    cwd: null,
   });
   const session = backendToSession(info, { starting: false });
   upsertSession(session);
@@ -409,26 +682,46 @@ export async function createSession(name?: string): Promise<SessionInfo> {
   activeSessionId.set(session.id);
   stickySessionId.set(session.id);
   backendError.set(null);
+  scheduleSaveAppState(200);
   return session;
 }
 
 /**
  * Kill and remove a session. Chat bubbles for that session stay in history.
  * Refuses to remove the last remaining session (creates none automatically).
+ * Busy/TUI: confirm once, then kill (tmux kill-session destroys the work).
  */
 export async function closeSession(sessionId: string): Promise<void> {
   const list = get(sessions);
   if (list.length <= 1) {
-    throw new Error("Cannot remove the last session — add another first, or keep one open.");
+    pushToast(
+      "warn",
+      "Cannot remove the last session — add another first.",
+    );
+    return;
   }
-  if (!list.some((s) => s.id === sessionId)) {
+  const session = list.find((s) => s.id === sessionId);
+  if (!session) {
     throw new Error("Session not found");
+  }
+
+  if (sessionIsTui(session) || session.activity === "busy") {
+    const kind = sessionIsTui(session) ? "interactive UI" : "running command";
+    const what = session.lastCommand ?? kind;
+    const ok = window.confirm(
+      `Kill ${what} in @${session.name} and remove this session?\n\n` +
+        (session.backend === "tmux"
+          ? "This ends the host tmux session (not recoverable by reattach)."
+          : "This kills the shell process."),
+    );
+    if (!ok) return;
   }
 
   await invoke("close_session", { sessionId });
   // Also handled by session-removed; call locally so UI updates immediately.
   forgetSessionLocally(sessionId);
   backendError.set(null);
+  scheduleSaveAppState(100);
 }
 
 /**
@@ -449,14 +742,33 @@ export async function renameSession(
   });
   applySessionRename(info.id, info.name);
   backendError.set(null);
+  scheduleSaveAppState(200);
   return backendToSession(info);
 }
 
-export async function teardownSessionBridge(): Promise<void> {
+export async function teardownSessionBridge(
+  opts: { persist?: boolean } = {},
+): Promise<void> {
+  const shouldPersist = opts.persist !== false;
+  if (shouldPersist) {
+    try {
+      await flushSaveAppState();
+    } catch {
+      /* ignore */
+    }
+  }
+  pausePersistence();
   clearAllTimers();
   while (unlistens.length) {
     try {
       unlistens.pop()?.();
+    } catch {
+      /* ignore */
+    }
+  }
+  while (storeUnsubs.length) {
+    try {
+      storeUnsubs.pop()?.();
     } catch {
       /* ignore */
     }
@@ -468,6 +780,11 @@ export async function teardownSessionBridge(): Promise<void> {
   ptyScrollback.clear();
   termLineBuf.clear();
   resetAltScreenCarry();
+}
+
+/** Flush persisted state (call before app quit). */
+export async function persistAppStateNow(): Promise<void> {
+  await flushSaveAppState();
 }
 
 /**
@@ -489,7 +806,8 @@ export async function beginTurnAndSend(
 }
 
 function sessionIsTui(s: SessionInfo): boolean {
-  return s.activity === "tui" || !!s.tuiActive || get(altScreenSessions).has(s.id);
+  // Prefer activity from tmux poll (or CSI path for plain backends).
+  return s.activity === "tui" || !!s.tuiActive;
 }
 
 function sessionIsStarting(s: SessionInfo): boolean {
@@ -520,10 +838,15 @@ export async function sendCommand(text: string): Promise<void> {
     throw new Error(`${names} is still starting — try again in a moment.`);
   }
 
-  const blocked = parsed.targets.filter(sessionIsTui);
-  const allowed = parsed.targets.filter((t) => !sessionIsTui(t));
+  const targets = parsed.targets.map(
+    (t) => get(sessions).find((s) => s.id === t.id) ?? t,
+  );
 
-  if (blocked.length && allowed.length === 0) {
+  const blocked = targets.filter(sessionIsTui);
+  // Inject is fine while busy (new line); blocked only for TUI.
+  const injectTargets = targets.filter((t) => !sessionIsTui(t));
+
+  if (blocked.length && injectTargets.length === 0) {
     const names = blocked.map((t) => `@${t.name}`).join(", ");
     pushToast(
       "warn",
@@ -534,15 +857,15 @@ export async function sendCommand(text: string): Promise<void> {
 
   if (blocked.length) {
     const names = blocked.map((t) => `@${t.name}`).join(", ");
-    const used = allowed.map((t) => `@${t.name}`).join(", ");
+    const used = injectTargets.map((t) => `@${t.name}`).join(", ");
     pushToast("warn", `Skipped ${names} (interactive UI) · ran on ${used}`);
   }
 
   // Fire in parallel — each session has its own turn capture.
   await Promise.all(
-    allowed.map((target) => {
+    injectTargets.map((target) => {
       const label =
-        parsed.targets.length > 1
+        targets.length > 1
           ? `@${target.name} ${parsed.command}`
           : parsed.display;
       return beginTurnAndSend(target, parsed.command, label, "composer");
