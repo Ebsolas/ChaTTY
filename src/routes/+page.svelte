@@ -7,10 +7,12 @@
   import Composer from "$lib/components/Composer.svelte";
   import SessionsRail from "$lib/components/SessionsRail.svelte";
   import SessionTerminal from "$lib/components/SessionTerminal.svelte";
+  import ToastStack from "$lib/components/ToastStack.svelte";
   import { matchAction, type ActionId } from "$lib/keybindings";
   import {
     activeSessionId,
     activeTurn,
+    activeTurns,
     backendError,
     chordFor,
     connected,
@@ -30,7 +32,7 @@
     openExpandedSession,
     renameSession,
     sendCommand,
-    sendControl,
+    sendControlToTargets,
     teardownSessionBridge,
   } from "$lib/sessionBridge";
 
@@ -90,7 +92,6 @@
       if (action) {
         // In text fields, ignore bare keys; only allow modified navigation chords.
         if (inField && !e.altKey && !e.metaKey && action !== "focusComposer") {
-          // still allow nothing without alt for session nav from composer? user wants Alt
           return;
         }
         e.preventDefault();
@@ -99,18 +100,28 @@
         return;
       }
 
-      // Shell control keys (Ctrl+C etc.) only when terminal overlay is closed
-      // and not typing in composer.
-      if (get(expandedSessionId) || inField) return;
       if (!get(connected)) return;
+
+      // Shell signals (^C, ^Z, …): always allowed — including TUI sessions and
+      // while the composer is focused. When the session terminal is open, let
+      // xterm deliver the key instead so the focused shell gets it.
+      //
+      // Targets: leading @mentions in the composer (`@local-2` + Ctrl+C),
+      // otherwise sticky/active.
+      if (get(expandedSessionId)) return;
 
       const ctrl = controlFromKeyboard(e);
       if (!ctrl) return;
       e.preventDefault();
       e.stopPropagation();
-      void sendControl(ctrl.label, ctrl.byte).catch((err) => {
-        backendError.set(String(err));
-      });
+      const composerText =
+        document.querySelector<HTMLInputElement>("[data-composer-input]")?.value ??
+        null;
+      void sendControlToTargets(ctrl.label, ctrl.byte, composerText).catch(
+        (err) => {
+          backendError.set(String(err));
+        },
+      );
     };
     window.addEventListener("keydown", onKeydown, true);
 
@@ -261,23 +272,37 @@
       : null,
   );
 
+  /**
+   * Bottom bar: long-running line commands only (builds, etc.).
+   * TUIs stay in the rail/session view — they are not expected to "finish" here.
+   */
+  const busySessions = $derived(
+    $sessions.filter((s) => {
+      if (s.activity === "tui" || s.tuiActive) return false;
+      if (s.activity === "busy") return true;
+      const turn = $activeTurns.get(s.id);
+      return !!turn && !turn.pausedForTui;
+    }),
+  );
+
+  /** Prefer sticky/active for the status chip; otherwise first busy. */
   const busySession = $derived(
-    $activeTurn
-      ? ($sessions.find((s) => s.id === $activeTurn.sessionId) ?? null)
-      : $sessions.find((s) => s.activity === "busy" || s.activity === "tui") ?? null,
+    busySessions.find((s) => s.id === $activeSessionId) ??
+      busySessions.find((s) => s.id === $stickySessionId) ??
+      busySessions[0] ??
+      null,
   );
 
-  const busyMode = $derived<"busy" | "tui">(
-    busySession?.activity === "tui" || busySession?.tuiActive
-      ? "tui"
-      : "busy",
+  const showBusyBar = $derived(busySessions.length > 0 && !$expandedSessionId);
+
+  const busyExtra = $derived(
+    Math.max(0, busySessions.length - (busySession ? 1 : 0)),
   );
 
-  const showBusyBar = $derived(
-    !!busySession &&
-      (busySession.activity === "busy" ||
-        busySession.activity === "tui" ||
-        !!$activeTurn),
+  const busyCommand = $derived(
+    (busySession && $activeTurns.get(busySession.id)?.command) ??
+      $activeTurn?.command ??
+      busySession?.lastCommand,
   );
 </script>
 
@@ -330,19 +355,21 @@
       <div class="chat-body">
         <ChatView messages={$messages} onOpenSession={handleOpenSession} />
         {#if expandedSession}
-          <SessionTerminal sessionId={expandedSession.id} sessionName={expandedSession.name} />
+          {#key expandedSession.id}
+            <SessionTerminal sessionId={expandedSession.id} sessionName={expandedSession.name} />
+          {/key}
         {/if}
+        <ToastStack />
       </div>
 
-      {#if showBusyBar && !$expandedSessionId}
+      {#if showBusyBar && busySession}
         <BusyIndicator
-          sessionName={busySession?.name ?? "local"}
-          command={$activeTurn?.command ?? busySession?.lastCommand}
-          mode={busyMode}
-          onOpen={() => {
-            const id = busySession?.id ?? $activeSessionId;
-            if (id) handleOpenSession(id);
-          }}
+          sessionName={busySession.name}
+          command={busyExtra > 0
+            ? `${busyCommand ?? ""}${busyCommand ? " · " : ""}+${busyExtra} more`
+            : busyCommand}
+          mode="busy"
+          onOpen={() => handleOpenSession(busySession.id)}
         />
       {/if}
     </section>

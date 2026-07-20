@@ -23,6 +23,30 @@ export const backendError = writable<string | null>(null);
 export const connected = writable(false);
 export const expandedSessionId = writable<string | null>(null);
 
+/** Soft notices (warnings/info) — bottom-right balloon, not the red error strip. */
+export type ToastLevel = "info" | "warn";
+export type Toast = {
+  id: string;
+  level: ToastLevel;
+  message: string;
+  createdAt: number;
+};
+
+export const toasts = writable<Toast[]>([]);
+
+const TOAST_TTL_MS = 5200;
+
+export function pushToast(level: ToastLevel, message: string) {
+  const id = crypto.randomUUID();
+  const toast: Toast = { id, level, message, createdAt: Date.now() };
+  toasts.update((list) => [...list, toast].slice(-4));
+  setTimeout(() => dismissToast(id), TOAST_TTL_MS);
+}
+
+export function dismissToast(id: string) {
+  toasts.update((list) => list.filter((t) => t.id !== id));
+}
+
 /** Resolved keybindings (defaults ∪ user config). */
 export const keybindings = writable<KeybindingsMap>({ ...DEFAULT_BINDINGS });
 /** Path of loaded user keybindings file, if any. */
@@ -66,8 +90,55 @@ export type ActiveTurn = {
   pausedForTui: boolean;
 };
 
-export const activeTurn = writable<ActiveTurn | null>(null);
-export const isBusy = derived(activeTurn, ($t) => $t != null);
+/**
+ * One open chat capture per session so TUIs / long builds on @local
+ * never block work on @local-2.
+ */
+export const activeTurns = writable<Map<string, ActiveTurn>>(new Map());
+
+export function getSessionTurn(sessionId: string): ActiveTurn | null {
+  return get(activeTurns).get(sessionId) ?? null;
+}
+
+export function setSessionTurn(sessionId: string, turn: ActiveTurn | null) {
+  activeTurns.update((map) => {
+    const next = new Map(map);
+    if (turn) next.set(sessionId, turn);
+    else next.delete(sessionId);
+    return next;
+  });
+}
+
+export function patchSessionTurn(
+  sessionId: string,
+  patch: Partial<ActiveTurn> | ((t: ActiveTurn) => ActiveTurn),
+) {
+  activeTurns.update((map) => {
+    const cur = map.get(sessionId);
+    if (!cur) return map;
+    const next = new Map(map);
+    next.set(
+      sessionId,
+      typeof patch === "function" ? patch(cur) : { ...cur, ...patch },
+    );
+    return next;
+  });
+}
+
+/** Prefer sticky/active session's turn for chrome that shows a single command. */
+export const activeTurn = derived(
+  [activeTurns, stickySessionId, activeSessionId],
+  ([$turns, $sticky, $active]) => {
+    const prefer = $sticky ?? $active;
+    if (prefer && $turns.has(prefer)) return $turns.get(prefer)!;
+    const first = $turns.values().next();
+    return first.done ? null : first.value;
+  },
+);
+
+export const isBusy = derived(activeTurns, ($m) => $m.size > 0);
+
+export const busySessionIds = derived(activeTurns, ($m) => [...$m.keys()]);
 
 /** Alt-screen / TUI active on a session — pause terminal→chat line turns. */
 export const altScreenSessions = writable<Set<string>>(new Set());
@@ -145,6 +216,7 @@ export function removeSession(sessionId: string) {
     next.delete(sessionId);
     return next;
   });
+  setSessionTurn(sessionId, null);
   if (get(activeSessionId) === sessionId) {
     const remaining = get(sessions);
     activeSessionId.set(remaining[0]?.id ?? null);
@@ -197,8 +269,8 @@ export function setSessionTui(sessionId: string, tuiActive: boolean) {
         return { ...s, tuiActive: true, activity: "tui" as const };
       }
       // Leaving TUI: busy if a turn is still open, else idle
-      const turn = get(activeTurn);
-      const busy = turn?.sessionId === sessionId && !turn.pausedForTui;
+      const turn = getSessionTurn(sessionId);
+      const busy = !!turn && !turn.pausedForTui;
       return {
         ...s,
         tuiActive: false,
@@ -319,25 +391,35 @@ function isPromptishLine(line: string): boolean {
   return false;
 }
 
-export function sealTurn(status: TurnStatus = "ok") {
-  const turn = get(activeTurn);
+/** Seal the open turn for a specific session (other sessions keep running). */
+export function sealTurn(sessionId: string, status: TurnStatus = "ok") {
+  const turn = getSessionTurn(sessionId);
   if (!turn) return;
   let body = formatPtyCapture(turn.raw, turn.command);
-  if (status === "tui" || turn.pausedForTui) {
+  let finalStatus = status;
+  const inAlt = get(altScreenSessions).has(sessionId);
+  // Bubble/footer can say "tui" when the command entered a UI even if it has since exited.
+  if (status === "tui" || turn.pausedForTui || inAlt) {
     body = body
       ? `${body}\n\n[interactive UI — open session view]`
       : "[interactive UI — open session view]";
-    status = "tui";
+    finalStatus = "tui";
   }
   updateTurnBubble(turn.messageId, body || "(no output)", {
     open: false,
-    turnStatus: status,
+    turnStatus: finalStatus,
   });
-  // Don't clobber tui activity if still in alt-screen
-  if (get(altScreenSessions).has(turn.sessionId)) {
-    setSessionActivity(turn.sessionId, "tui", turn.command);
+  // Live session activity: sticky TUI only while still in alt-screen.
+  if (inAlt) {
+    setSessionActivity(sessionId, "tui", turn.command);
   } else {
-    setSessionActivity(turn.sessionId, "idle");
+    setSessionActivity(sessionId, "idle");
   }
-  activeTurn.set(null);
+  setSessionTurn(sessionId, null);
+}
+
+/** @deprecated use sealTurn(sessionId) — kept for call sites mid-refactor */
+export function sealActiveTurn(status: TurnStatus = "ok") {
+  const turn = get(activeTurn);
+  if (turn) sealTurn(turn.sessionId, status);
 }

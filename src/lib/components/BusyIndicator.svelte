@@ -17,40 +17,25 @@
     class="busy"
     class:tui={isTui}
     class:clickable={true}
-    title="Open session (Ctrl+`)"
+    title="Open session"
     onclick={() => onOpen?.()}
   >
     <span class="dots" aria-hidden="true"><span></span><span></span><span></span></span>
     <span class="text">
-      {#if isTui}
-        <strong class="mono">@{sessionName}</strong> interactive UI
-        {#if command}
-          <span class="cmd mono">{command}</span>
-        {/if}
-        <span class="hint">— click or Ctrl+` to open</span>
-      {:else}
-        <strong class="mono">@{sessionName}</strong> is running
-        {#if command}
-          <span class="cmd mono">{command}</span>
-        {/if}
-        <span class="hint">· Ctrl+`</span>
+      <strong class="mono">@{sessionName}</strong> is running
+      {#if command}
+        <span class="cmd mono">{command}</span>
       {/if}
+      <span class="hint">· click to open</span>
     </span>
   </button>
 {:else}
   <div class="busy" class:tui={isTui} role="status" aria-live="polite">
     <span class="dots" aria-hidden="true"><span></span><span></span><span></span></span>
     <span class="text">
-      {#if isTui}
-        <strong class="mono">@{sessionName}</strong> interactive UI
-        {#if command}
-          <span class="cmd mono">{command}</span>
-        {/if}
-      {:else}
-        <strong class="mono">@{sessionName}</strong> is running
-        {#if command}
-          <span class="cmd mono">{command}</span>
-        {/if}
+      <strong class="mono">@{sessionName}</strong> is running
+      {#if command}
+        <span class="cmd mono">{command}</span>
       {/if}
     </span>
   </div>

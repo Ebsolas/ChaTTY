@@ -6,11 +6,11 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { get } from "svelte/store";
-import { parseComposer } from "./mentions";
-import { detectAltScreenChange } from "./termDetect";
+import { parseComposer, parseLeadingMentions } from "./mentions";
+import { looksLikeTuiNoise, resetAltScreenCarry, scanAltScreen } from "./termDetect";
 import {
   activeSessionId,
-  activeTurn,
+  activeTurns,
   altScreenSessions,
   appendUserMessage,
   applySessionRename,
@@ -19,15 +19,19 @@ import {
   connected,
   expandedSessionId,
   formatPtyCapture,
+  getSessionTurn,
   markSessionReady,
   MIN_AFTER_FIRST_CHUNK_MS,
   openSessionBubble,
+  patchSessionTurn,
+  pushToast,
   QUIET_MS,
   removeSession,
   sealTurn,
   sessions,
   setSessionActivity,
   setSessionProcessStatus,
+  setSessionTurn,
   setSessionTui,
   stickySessionId,
   TURN_MAX_MS,
@@ -48,8 +52,9 @@ const unlistens: UnlistenFn[] = [];
 const ptyScrollback = new Map<string, string>();
 const SCROLLBACK_MAX = 500_000;
 
-let quietTimer: ReturnType<typeof setTimeout> | null = null;
-let maxTimer: ReturnType<typeof setTimeout> | null = null;
+/** Per-session quiet / max seal timers (independent captures). */
+const quietTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const maxTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 type RawListener = (sessionId: string, chunk: string) => void;
 const rawListeners = new Set<RawListener>();
@@ -111,131 +116,170 @@ function appendPty(sessionId: string, text: string) {
   if (next.length > SCROLLBACK_MAX) next = next.slice(next.length - SCROLLBACK_MAX);
   ptyScrollback.set(sessionId, next);
 
-  // --- TUI / alternate screen detection ---
-  const alt = detectAltScreenChange(text);
+  // --- TUI / alternate screen detection (per session, sticky until leave CSI) ---
+  let alt = scanAltScreen(sessionId, text);
+  // Heuristic: dense redraws with no CSI yet still mean a full-screen app.
+  if (alt === null && !get(altScreenSessions).has(sessionId) && looksLikeTuiNoise(text)) {
+    alt = "enter";
+  }
   if (alt === "enter") {
-    setSessionTui(sessionId, true);
-    termLineBuf.set(sessionId, "");
-    const turn = get(activeTurn);
-    if (turn && turn.sessionId === sessionId && !turn.pausedForTui) {
-      // Stop stuffing redraws into the chat bubble; leave a clear marker.
-      activeTurn.update((t) => (t ? { ...t, pausedForTui: true } : t));
-      clearTimers(); // don't quiet-seal mid-TUI
-      updateTurnBubble(turn.messageId, "[interactive UI running — open session view]", {
-        open: true,
-        turnStatus: "tui",
-      });
-    }
+    enterTuiMode(sessionId);
   } else if (alt === "leave") {
-    setSessionTui(sessionId, false);
-    const turn = get(activeTurn);
-    if (turn && turn.sessionId === sessionId && turn.pausedForTui) {
-      // TUI exited; seal the turn as tui-completed.
-      sealTurn("tui");
-      clearTimers();
-    }
+    leaveTuiMode(sessionId);
   }
 
   notifyRawListeners(sessionId, text);
 
-  const turn = get(activeTurn);
-  if (!turn || turn.sessionId !== sessionId) return;
+  const turn = getSessionTurn(sessionId);
+  if (!turn) return;
   // Don't accumulate TUI framebuffer noise into the chat capture.
   if (turn.pausedForTui || get(altScreenSessions).has(sessionId)) return;
 
   const now = Date.now();
   const raw = turn.raw + text;
-  activeTurn.update((t) =>
-    t
-      ? {
-          ...t,
-          raw,
-          sawChunk: true,
-          firstChunkAt: t.firstChunkAt ?? now,
-          lastChunkAt: now,
-        }
-      : t,
-  );
+  patchSessionTurn(sessionId, {
+    raw,
+    sawChunk: true,
+    firstChunkAt: turn.firstChunkAt ?? now,
+    lastChunkAt: now,
+  });
   updateTurnBubble(turn.messageId, formatPtyCapture(raw, turn.command) || "…", {
     open: true,
     turnStatus: "running",
   });
-  scheduleQuietSeal();
+  scheduleQuietSeal(sessionId);
 }
 
-function clearTimers() {
-  if (quietTimer) {
-    clearTimeout(quietTimer);
-    quietTimer = null;
+/** Mark session as TUI; cancel seal timers so long-lived apps never "time out". */
+function enterTuiMode(sessionId: string) {
+  const already = get(altScreenSessions).has(sessionId);
+  setSessionTui(sessionId, true);
+  termLineBuf.set(sessionId, "");
+  clearTimers(sessionId);
+  const turn = getSessionTurn(sessionId);
+  if (turn && !turn.pausedForTui) {
+    patchSessionTurn(sessionId, { pausedForTui: true });
+    updateTurnBubble(turn.messageId, "[interactive UI running — open session view]", {
+      open: true,
+      turnStatus: "tui",
+    });
+  } else if (!already && turn?.pausedForTui) {
+    // already marked
   }
-  if (maxTimer) {
-    clearTimeout(maxTimer);
-    maxTimer = null;
+}
+
+/** Only path that clears TUI — requires explicit alt-screen leave CSI. */
+function leaveTuiMode(sessionId: string) {
+  if (!get(altScreenSessions).has(sessionId)) return;
+  setSessionTui(sessionId, false);
+  const turn = getSessionTurn(sessionId);
+  if (turn?.pausedForTui) {
+    sealTurn(sessionId, "tui");
+    clearTimers(sessionId);
   }
 }
 
-function scheduleQuietSeal() {
-  if (quietTimer) clearTimeout(quietTimer);
-  quietTimer = setTimeout(() => {
-    const turn = get(activeTurn);
-    if (!turn) return;
-
-    // Never quiet-seal while a full-screen TUI owns the session.
-    if (turn.pausedForTui || get(altScreenSessions).has(turn.sessionId)) {
-      return;
-    }
-
-    // Wait until we've actually received PTY data for this turn.
-    if (!turn.sawChunk || turn.firstChunkAt == null) {
-      scheduleQuietSeal();
-      return;
-    }
-    const sinceFirst = Date.now() - turn.firstChunkAt;
-    if (sinceFirst < MIN_AFTER_FIRST_CHUNK_MS) {
-      scheduleQuietSeal();
-      return;
-    }
-
-    // Don't seal empty if data might still be coming (Starship/slow cmds).
-    const body = formatPtyCapture(turn.raw, turn.command);
-    const sinceLast = Date.now() - turn.lastChunkAt;
-    if (!body && sinceLast < 1500) {
-      scheduleQuietSeal();
-      return;
-    }
-
-    sealTurn("ok");
-    clearTimers();
-  }, QUIET_MS);
+function clearTimers(sessionId: string) {
+  const q = quietTimers.get(sessionId);
+  if (q) {
+    clearTimeout(q);
+    quietTimers.delete(sessionId);
+  }
+  const m = maxTimers.get(sessionId);
+  if (m) {
+    clearTimeout(m);
+    maxTimers.delete(sessionId);
+  }
 }
 
-function armMaxTimer(turnId: string) {
-  if (maxTimer) clearTimeout(maxTimer);
-  maxTimer = setTimeout(() => {
-    const t = get(activeTurn);
-    if (t && t.turnId === turnId) {
-      sealTurn("ok");
-      clearTimers();
-    }
-  }, TURN_MAX_MS);
+function clearAllTimers() {
+  for (const id of [...quietTimers.keys()]) clearTimers(id);
 }
 
-/** Synchronous turn arming — must run before any PTY write for that turn. */
+function scheduleQuietSeal(sessionId: string) {
+  const prev = quietTimers.get(sessionId);
+  if (prev) clearTimeout(prev);
+  // Never schedule quiet seals against a known TUI session.
+  if (get(altScreenSessions).has(sessionId)) return;
+
+  quietTimers.set(
+    sessionId,
+    setTimeout(() => {
+      const turn = getSessionTurn(sessionId);
+      if (!turn) return;
+
+      // Never quiet-seal while a full-screen TUI owns this session.
+      if (turn.pausedForTui || get(altScreenSessions).has(sessionId)) {
+        return;
+      }
+
+      // Wait until we've actually received PTY data for this turn.
+      if (!turn.sawChunk || turn.firstChunkAt == null) {
+        scheduleQuietSeal(sessionId);
+        return;
+      }
+      const sinceFirst = Date.now() - turn.firstChunkAt;
+      if (sinceFirst < MIN_AFTER_FIRST_CHUNK_MS) {
+        scheduleQuietSeal(sessionId);
+        return;
+      }
+
+      // Don't seal empty if data might still be coming (Starship/slow cmds).
+      const body = formatPtyCapture(turn.raw, turn.command);
+      const sinceLast = Date.now() - turn.lastChunkAt;
+      if (!body && sinceLast < 1500) {
+        scheduleQuietSeal(sessionId);
+        return;
+      }
+
+      sealTurn(sessionId, "ok");
+      clearTimers(sessionId);
+    }, QUIET_MS),
+  );
+}
+
+function armMaxTimer(sessionId: string, turnId: string) {
+  const prev = maxTimers.get(sessionId);
+  if (prev) clearTimeout(prev);
+  // TUIs (htop, ranger, …) can run indefinitely — no hard deadline.
+  if (get(altScreenSessions).has(sessionId)) return;
+
+  maxTimers.set(
+    sessionId,
+    setTimeout(() => {
+      const t = getSessionTurn(sessionId);
+      if (!t || t.turnId !== turnId) return;
+      // Re-check: entered TUI after the timer was armed.
+      if (t.pausedForTui || get(altScreenSessions).has(sessionId)) {
+        clearTimers(sessionId);
+        return;
+      }
+      sealTurn(sessionId, "ok");
+      clearTimers(sessionId);
+    }, TURN_MAX_MS),
+  );
+}
+
+/**
+ * Arm capture for one session. Other sessions keep their open turns
+ * (ranger on @local does not seal a build on @local-2).
+ */
 function startTurnCapture(
   session: SessionInfo,
   command: string,
   display: string,
   source: TurnSource,
 ): string {
-  if (get(activeTurn)) {
-    sealTurn("ok");
-    clearTimers();
+  // Only seal an existing turn on *this* session.
+  if (getSessionTurn(session.id)) {
+    sealTurn(session.id, "ok");
+    clearTimers(session.id);
   }
 
   const turnId = crypto.randomUUID();
   appendUserMessage(display, session.id, session.name, turnId);
   const bubble = openSessionBubble(session.id, session.name, turnId);
-  activeTurn.set({
+  setSessionTurn(session.id, {
     turnId,
     sessionId: session.id,
     command,
@@ -248,17 +292,21 @@ function startTurnCapture(
     sawChunk: false,
     pausedForTui: false,
   });
-  // If already in TUI, mark busy-as-tui
+  // If already in TUI, mark busy-as-tui and never arm seal timers.
   if (get(altScreenSessions).has(session.id)) {
     setSessionActivity(session.id, "tui", command);
-    activeTurn.update((t) => (t ? { ...t, pausedForTui: true } : t));
-  } else {
-    setSessionActivity(session.id, "busy", command);
+    patchSessionTurn(session.id, { pausedForTui: true });
+    activeSessionId.set(session.id);
+    stickySessionId.set(session.id);
+    clearTimers(session.id);
+    return turnId;
   }
+
+  setSessionActivity(session.id, "busy", command);
   activeSessionId.set(session.id);
   stickySessionId.set(session.id);
-  armMaxTimer(turnId);
-  scheduleQuietSeal();
+  armMaxTimer(session.id, turnId);
+  scheduleQuietSeal(session.id);
   return turnId;
 }
 
@@ -311,9 +359,9 @@ export async function initSessionBridge(): Promise<void> {
       // If we already closed/removed this session, ignore natural exit noise.
       if (!get(sessions).some((s) => s.id === sessionId)) return;
       setSessionProcessStatus(sessionId, "exited");
-      if (get(activeTurn)?.sessionId === sessionId) {
-        sealTurn("error");
-        clearTimers();
+      if (getSessionTurn(sessionId)) {
+        sealTurn(sessionId, "error");
+        clearTimers(sessionId);
       }
     }),
   );
@@ -334,12 +382,13 @@ export async function initSessionBridge(): Promise<void> {
 
 /** Drop frontend bookkeeping for a session (PTY scrollback, turns, stores). */
 function forgetSessionLocally(sessionId: string) {
-  if (get(activeTurn)?.sessionId === sessionId) {
-    sealTurn("error");
-    clearTimers();
+  if (getSessionTurn(sessionId)) {
+    sealTurn(sessionId, "error");
+    clearTimers(sessionId);
   }
   ptyScrollback.delete(sessionId);
   termLineBuf.delete(sessionId);
+  resetAltScreenCarry(sessionId);
   removeSession(sessionId);
 }
 
@@ -404,7 +453,7 @@ export async function renameSession(
 }
 
 export async function teardownSessionBridge(): Promise<void> {
-  clearTimers();
+  clearAllTimers();
   while (unlistens.length) {
     try {
       unlistens.pop()?.();
@@ -415,9 +464,10 @@ export async function teardownSessionBridge(): Promise<void> {
   rawListeners.clear();
   rawPending.clear();
   rawFlushScheduled = false;
-  activeTurn.set(null);
+  activeTurns.set(new Map());
   ptyScrollback.clear();
   termLineBuf.clear();
+  resetAltScreenCarry();
 }
 
 /**
@@ -449,8 +499,9 @@ function sessionIsStarting(s: SessionInfo): boolean {
 export async function sendCommand(text: string): Promise<void> {
   const trimmed = text.replace(/\s+$/, "");
   if (!trimmed) return;
-  // Composer stays available even if the session terminal / TUI is open.
+  // Composer stays available even if a session terminal / TUI is open.
   // We only refuse to *inject* into a session that is currently in TUI mode.
+  // Other sessions stay fully usable in parallel.
 
   const sticky = get(stickySessionId) ?? get(activeSessionId);
   const parsed = parseComposer(trimmed, get(sessions), sticky);
@@ -474,41 +525,29 @@ export async function sendCommand(text: string): Promise<void> {
 
   if (blocked.length && allowed.length === 0) {
     const names = blocked.map((t) => `@${t.name}`).join(", ");
-    throw new Error(
-      `${names} is in interactive UI (TUI) — open the session view; chat won't inject keys into a full-screen app.`,
+    pushToast(
+      "warn",
+      `${names} is in interactive UI — open the session, @mention another, or Ctrl+C to interrupt.`,
     );
+    return;
   }
 
   if (blocked.length) {
     const names = blocked.map((t) => `@${t.name}`).join(", ");
-    backendError.set(`Skipped TUI session(s): ${names}`);
-  } else {
-    backendError.set(null);
+    const used = allowed.map((t) => `@${t.name}`).join(", ");
+    pushToast("warn", `Skipped ${names} (interactive UI) · ran on ${used}`);
   }
 
-  for (const target of allowed) {
-    const label =
-      parsed.targets.length > 1
-        ? `@${target.name} ${parsed.command}`
-        : parsed.display;
-    await beginTurnAndSend(target, parsed.command, label, "composer");
-    await waitForTurnIdle();
-  }
-}
-
-function waitForTurnIdle(): Promise<void> {
-  return new Promise((resolve) => {
-    if (!get(activeTurn)) {
-      resolve();
-      return;
-    }
-    const unsub = activeTurn.subscribe((t) => {
-      if (!t) {
-        unsub();
-        resolve();
-      }
-    });
-  });
+  // Fire in parallel — each session has its own turn capture.
+  await Promise.all(
+    allowed.map((target) => {
+      const label =
+        parsed.targets.length > 1
+          ? `@${target.name} ${parsed.command}`
+          : parsed.display;
+      return beginTurnAndSend(target, parsed.command, label, "composer");
+    }),
+  );
 }
 
 /** Debounce accidental double-CR from the emulator or key repeat. */
@@ -576,10 +615,9 @@ export function prepareTerminalWrite(sessionId: string, data: string): PreparedW
 }
 
 function armTerminalTurn(sessionId: string, line: string) {
-  const turn = get(activeTurn);
+  const turn = getSessionTurn(sessionId);
   if (
     turn &&
-    turn.sessionId === sessionId &&
     turn.source === "composer" &&
     turn.command === line &&
     Date.now() - turn.startedAt < 800
@@ -633,24 +671,99 @@ export const CTRL = {
   BACKSLASH: 0x1c,
 } as const;
 
-export async function sendControl(label: string, byte: number): Promise<void> {
-  const sessionId = get(stickySessionId) ?? get(activeSessionId);
-  if (!sessionId) return;
+/**
+ * Send a control byte (e.g. ^C) to one session.
+ * Works even in TUI mode — interrupts are always allowed.
+ */
+export async function sendControl(
+  label: string,
+  byte: number,
+  sessionId?: string | null,
+): Promise<void> {
+  const id = sessionId ?? get(stickySessionId) ?? get(activeSessionId);
+  if (!id) return;
+  await sendControlToSession(id, label, byte);
+}
 
-  if (byte === CTRL.C && get(activeTurn)?.sessionId === sessionId) {
-    setTimeout(() => {
-      if (get(activeTurn)?.sessionId === sessionId) {
-        sealTurn("error");
-        clearTimers();
-      }
-    }, 500);
+async function sendControlToSession(
+  sessionId: string,
+  _label: string,
+  byte: number,
+): Promise<void> {
+  // ^C: seal an open line-turn if any (builds); TUI may stay until it exits alt-screen.
+  if (byte === CTRL.C) {
+    const turn = getSessionTurn(sessionId);
+    if (turn && !turn.pausedForTui) {
+      setTimeout(() => {
+        const t = getSessionTurn(sessionId);
+        if (t && t.turnId === turn.turnId && !t.pausedForTui) {
+          sealTurn(sessionId, "error");
+          clearTimers(sessionId);
+        }
+      }, 500);
+    }
   }
 
-  // Ctrl+C etc. shouldn't go through line buffering as text.
   await invoke("send_raw", {
     sessionId,
     bytes: [byte],
   });
+}
+
+/**
+ * Resolve which session(s) get a shell signal:
+ * - Leading `@name` / `@a, @b` in the composer → those sessions
+ * - Otherwise sticky / active
+ *
+ * Example: type `@local-2` then Ctrl+C to interrupt htop on local-2
+ * without changing sticky permanently (unless you Enter to set sticky).
+ */
+export function resolveControlTargets(composerText?: string | null): SessionInfo[] {
+  const list = get(sessions);
+  const sticky = get(stickySessionId) ?? get(activeSessionId);
+
+  if (composerText != null && composerText.trim()) {
+    const { targets, missing } = parseLeadingMentions(composerText, list);
+    if (missing.length) {
+      pushToast(
+        "warn",
+        `Unknown session: ${missing.map((n) => `@${n}`).join(", ")}`,
+      );
+    }
+    if (targets.length) return targets;
+  }
+
+  const fallback = list.find((s) => s.id === sticky) ?? list[0];
+  return fallback ? [fallback] : [];
+}
+
+/**
+ * Send a control byte to every resolved target (mentions or sticky).
+ */
+export async function sendControlToTargets(
+  label: string,
+  byte: number,
+  composerText?: string | null,
+): Promise<void> {
+  const targets = resolveControlTargets(composerText);
+  if (targets.length === 0) return;
+
+  await Promise.all(
+    targets.map((s) => sendControlToSession(s.id, label, byte)),
+  );
+
+  // Soft feedback when interrupting a non-sticky mention (easy to miss).
+  if (targets.length === 1) {
+    const sticky = get(stickySessionId) ?? get(activeSessionId);
+    if (targets[0]!.id !== sticky) {
+      pushToast("info", `Sent ${label} → @${targets[0]!.name}`);
+    }
+  } else if (targets.length > 1) {
+    pushToast(
+      "info",
+      `Sent ${label} → ${targets.map((t) => `@${t.name}`).join(", ")}`,
+    );
+  }
 }
 
 export async function resizeSession(

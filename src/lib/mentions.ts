@@ -100,3 +100,43 @@ export function mentionSuggestions(
     (s) => !q || s.name.toLowerCase().startsWith(q) || s.name.toLowerCase().includes(q),
   );
 }
+
+/**
+ * Leading @mentions only (no sticky fallback).
+ * Used for Ctrl+C routing: `@local-2` + Ctrl+C interrupts local-2, not sticky.
+ */
+export function parseLeadingMentions(
+  text: string,
+  sessions: SessionInfo[],
+): { targets: SessionInfo[]; missing: string[] } {
+  const trimmed = text.replace(/\s+$/, "").trim();
+  if (!trimmed) return { targets: [], missing: [] };
+
+  const mentionRe = /^@([\w.-]+)\s*(?:,\s*)?/i;
+  let rest = trimmed;
+  const names: string[] = [];
+
+  while (true) {
+    const m = rest.match(mentionRe);
+    if (!m) break;
+    names.push(m[1]!.toLowerCase());
+    rest = rest.slice(m[0].length);
+  }
+
+  if (names.length === 0) return { targets: [], missing: [] };
+
+  const byName = new Map(sessions.map((s) => [s.name.toLowerCase(), s]));
+  const targets: SessionInfo[] = [];
+  const missing: string[] = [];
+
+  for (const n of names) {
+    const s = byName.get(n);
+    if (s) {
+      if (!targets.some((t) => t.id === s.id)) targets.push(s);
+    } else {
+      missing.push(n);
+    }
+  }
+
+  return { targets, missing };
+}

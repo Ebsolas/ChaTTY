@@ -73,4 +73,6 @@ config/keybindings.example.json
 npm run tauri dev
 ```
 
-Deferred: branching UI, SSH, Windows/pwsh, concurrent multi-turn capture, job-runner exec channel.
+Composer **↑ / ↓** recalls command history (persisted in localStorage). Each session has its own chat capture, so a TUI or long job on `@local` does not block `@local-2`.
+
+Deferred: branching UI, SSH, Windows/pwsh, job-runner exec channel.

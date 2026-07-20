@@ -33,9 +33,11 @@
   let fit: FitAddon | undefined;
   let unsubRaw: (() => void) | undefined;
   let ro: ResizeObserver | undefined;
+  /** Fixed for this mount ({#key sessionId} remounts the component). */
+  let boundSessionId = "";
 
   onMount(() => {
-    // Defer xterm construction so the overlay chrome paints first.
+    boundSessionId = sessionId;
     let cancelled = false;
     let writeBuf = "";
     let writeScheduled = false;
@@ -87,8 +89,7 @@
       term.loadAddon(fit);
       term.open(host);
 
-      // Replay scrollback in rAF-sized chunks so huge login output doesn't freeze.
-      const history = getPtyScrollback(sessionId);
+      const history = getPtyScrollback(boundSessionId);
       if (history) {
         const CHUNK = 16_384;
         let offset = 0;
@@ -111,18 +112,16 @@
         term.focus();
       }
 
-      // Single path for keys → PTY. sendRawToSession normalizes Enter to one CR.
+      // Keys always go to the session this terminal was opened for.
       term.onData((data) => {
-        void sendRawToSession(sessionId, data).catch(console.error);
+        void sendRawToSession(boundSessionId, data).catch(console.error);
       });
 
       unsubRaw = subscribeRawOutput((id, chunk) => {
-        if (id !== sessionId || !term) return;
+        if (id !== boundSessionId || !term) return;
         queueWrite(chunk);
       });
 
-      // Debounce resize → SIGWINCH; rapid resizes during chat UI updates
-      // can confuse zsh line editing (feels like "press Enter twice").
       let resizeTimer: ReturnType<typeof setTimeout> | null = null;
       ro = new ResizeObserver(() => {
         if (resizeTimer) clearTimeout(resizeTimer);
@@ -169,7 +168,7 @@
     const rows = dims?.rows ?? term.rows;
     if (cols > 1 && rows > 1) {
       try {
-        await resizeSession(sessionId, cols, rows);
+        await resizeSession(boundSessionId, cols, rows);
       } catch (err) {
         console.error(err);
       }

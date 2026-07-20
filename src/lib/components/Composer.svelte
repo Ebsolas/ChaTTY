@@ -1,4 +1,8 @@
 <script lang="ts">
+  import {
+    loadComposerHistory,
+    pushComposerHistory,
+  } from "$lib/composerHistory";
   import { mentionSuggestions } from "$lib/mentions";
   import { chordFor, sessions, stickySessionId } from "$lib/stores";
 
@@ -11,6 +15,13 @@
   let value = $state("");
   let sending = $state(false);
   let inputEl: HTMLInputElement | undefined = $state();
+
+  /** Newest-first command history. */
+  let history = $state<string[]>(loadComposerHistory());
+  /** -1 = editing live draft; 0 = newest history entry. */
+  let historyIndex = $state(-1);
+  /** Snapshot of the input when history browse starts. */
+  let historyDraft = $state("");
 
   /** Text after the @ being completed, if any. */
   let mentionQuery = $state<string | null>(null);
@@ -70,10 +81,46 @@
     value = `${before}@${name} ${after}`;
     mentionQuery = null;
     mentionStart = -1;
+    // Editing live value — leave history browse mode.
+    historyIndex = -1;
     requestAnimationFrame(() => {
       const caret = before.length + name.length + 2;
       inputEl?.setSelectionRange(caret, caret);
       inputEl?.focus();
+    });
+  }
+
+  function historyUp() {
+    if (history.length === 0) return;
+    if (historyIndex === -1) {
+      historyDraft = value;
+      historyIndex = 0;
+    } else if (historyIndex < history.length - 1) {
+      historyIndex += 1;
+    } else {
+      return;
+    }
+    value = history[historyIndex] ?? "";
+    mentionQuery = null;
+    requestAnimationFrame(() => {
+      const len = value.length;
+      inputEl?.setSelectionRange(len, len);
+    });
+  }
+
+  function historyDown() {
+    if (historyIndex === -1) return;
+    if (historyIndex <= 0) {
+      historyIndex = -1;
+      value = historyDraft;
+    } else {
+      historyIndex -= 1;
+      value = history[historyIndex] ?? "";
+    }
+    mentionQuery = null;
+    requestAnimationFrame(() => {
+      const len = value.length;
+      inputEl?.setSelectionRange(len, len);
     });
   }
 
@@ -84,8 +131,11 @@
     sending = true;
     try {
       await onSend(text);
+      history = pushComposerHistory(history, text);
       value = "";
       mentionQuery = null;
+      historyIndex = -1;
+      historyDraft = "";
     } finally {
       sending = false;
     }
@@ -116,10 +166,33 @@
       }
     }
 
+    // Command history (when not picking @mentions)
+    if (mentionQuery === null) {
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        historyUp();
+        return;
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        historyDown();
+        return;
+      }
+    }
+
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void submit();
     }
+  }
+
+  function onInput() {
+    // Typing abandons history browse (draft is the live value).
+    if (historyIndex !== -1) {
+      historyIndex = -1;
+      historyDraft = "";
+    }
+    updateMentionState();
   }
 </script>
 
@@ -167,13 +240,13 @@
       data-composer-input
       type="text"
       placeholder={stickyIsTui
-        ? `@${stickyName} is in TUI — open session or @another session`
-        : `Command or @session …  (sticky: @${stickyName})`}
+        ? `@${stickyName} is in TUI — @another session to keep working`
+        : `Command or @session …  (sticky: @${stickyName}) · ↑ history`}
       bind:value
       bind:this={inputEl}
       {disabled}
       onkeydown={onKeydown}
-      oninput={updateMentionState}
+      oninput={onInput}
       onclick={updateMentionState}
       onkeyup={updateMentionState}
       autocomplete="off"
@@ -189,9 +262,9 @@
   </form>
   <p class="hint">
     {#if stickyIsTui}
-      @{stickyName} is in interactive UI — chat won't inject · {chordFor("toggleTerminal")} open session
+      @{stickyName} is in TUI — no line inject · <kbd>Ctrl+C</kbd> interrupts sticky · <kbd>@other</kbd>+<kbd>Ctrl+C</kbd> for another
     {:else}
-      @session cmd · sticky @{stickyName} · {chordFor("toggleTerminal")} terminal · {chordFor("focusComposer")} focus
+      sticky @{stickyName} · <kbd>@name</kbd>+<kbd>Ctrl+C</kbd> interrupt that session · ↑/↓ history · {chordFor("toggleTerminal")}
     {/if}
   </p>
 </div>
@@ -305,5 +378,13 @@
     padding: 0 1rem 0.65rem;
     font-size: 0.72rem;
     color: var(--muted, #8b93a7);
+  }
+
+  .hint kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.9em;
+    padding: 0.05em 0.3em;
+    border-radius: 4px;
+    border: 1px solid var(--border, #232833);
   }
 </style>
