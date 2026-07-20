@@ -18,6 +18,7 @@ import {
 import { resetAltScreenCarry, scanAltScreen } from "./termDetect";
 import {
   activeConversationId,
+  activeGroupId,
   activeSessionId,
   activeTurns,
   altScreenSessions,
@@ -29,10 +30,14 @@ import {
   connected,
   conversationFocus,
   conversations,
+  conversationsInGroup,
   createConversation,
+  createGroup,
   expandedSessionId,
   formatPtyCapture,
   getSessionTurn,
+  groupFocus,
+  groups,
   markSessionReady,
   messages,
   MIN_AFTER_FIRST_CHUNK_MS,
@@ -41,10 +46,12 @@ import {
   pushToast,
   QUIET_MS,
   removeConversationRecord,
+  removeGroupRecord,
   removeSession,
   sealTurn,
   sessions,
   sessionsInConversation,
+  setActiveGroup,
   setSessionActivity,
   setSessionProcessStatus,
   setSessionTurn,
@@ -58,6 +65,7 @@ import {
 import type {
   BackendSessionInfo,
   Conversation,
+  Group,
   SessionActivityEvent,
   SessionExitEvent,
   SessionInfo,
@@ -68,6 +76,8 @@ import type {
 import {
   CONVO_MAIN_ID,
   DEFAULT_CONVERSATIONS,
+  DEFAULT_GROUP,
+  GROUP_DEFAULT_ID,
 } from "./types";
 
 const unlistens: UnlistenFn[] = [];
@@ -417,7 +427,10 @@ export async function initSessionBridge(): Promise<void> {
   sessions.set([]);
   expandedSessionId.set(null);
   altScreenSessions.set(new Set());
-  conversations.set([...DEFAULT_CONVERSATIONS]);
+  groups.set([{ ...DEFAULT_GROUP }]);
+  activeGroupId.set(GROUP_DEFAULT_ID);
+  groupFocus.set({});
+  conversations.set(DEFAULT_CONVERSATIONS.map((c) => ({ ...c })));
   activeConversationId.set(CONVO_MAIN_ID);
   conversationFocus.set({});
 
@@ -426,15 +439,34 @@ export async function initSessionBridge(): Promise<void> {
     await attachSessionListeners();
 
     const saved = await loadAppState();
-    if (saved && (saved.sessions?.length || saved.conversations?.length)) {
+    if (
+      saved &&
+      (saved.sessions?.length ||
+        saved.conversations?.length ||
+        saved.groups?.length)
+    ) {
+      groups.set(
+        saved.groups?.length ? saved.groups : [{ ...DEFAULT_GROUP }],
+      );
+      groupFocus.set(saved.groupFocus ?? {});
       conversations.set(
         saved.conversations?.length
           ? saved.conversations
-          : [...DEFAULT_CONVERSATIONS],
+          : DEFAULT_CONVERSATIONS.map((c) => ({ ...c })),
       );
       conversationFocus.set(saved.conversationFocus ?? {});
+      const firstGroupId = get(groups)[0]?.id ?? GROUP_DEFAULT_ID;
+      activeGroupId.set(
+        saved.activeGroupId &&
+          get(groups).some((g) => g.id === saved.activeGroupId)
+          ? saved.activeGroupId
+          : firstGroupId,
+      );
+      const inActiveGroup = get(conversations).filter(
+        (c) => c.groupId === get(activeGroupId),
+      );
       const firstConvoId =
-        get(conversations)[0]?.id ?? CONVO_MAIN_ID;
+        inActiveGroup[0]?.id ?? get(conversations)[0]?.id ?? CONVO_MAIN_ID;
       activeConversationId.set(
         saved.activeConversationId &&
           get(conversations).some((c) => c.id === saved.activeConversationId)
@@ -595,6 +627,8 @@ export async function initSessionBridge(): Promise<void> {
   storeUnsubs.push(expandedSessionId.subscribe(() => scheduleSaveAppState()));
   storeUnsubs.push(activeConversationId.subscribe(() => scheduleSaveAppState()));
   storeUnsubs.push(conversations.subscribe(() => scheduleSaveAppState()));
+  storeUnsubs.push(activeGroupId.subscribe(() => scheduleSaveAppState()));
+  storeUnsubs.push(groups.subscribe(() => scheduleSaveAppState()));
   resumePersistence();
   // Capture restored state promptly.
   scheduleSaveAppState(300);
@@ -740,7 +774,10 @@ function handleTmuxActivity(ev: SessionActivityEvent) {
 }
 
 async function bootDefaultSession() {
-  conversations.set([...DEFAULT_CONVERSATIONS]);
+  groups.set([{ ...DEFAULT_GROUP }]);
+  activeGroupId.set(GROUP_DEFAULT_ID);
+  groupFocus.set({});
+  conversations.set(DEFAULT_CONVERSATIONS.map((c) => ({ ...c })));
   activeConversationId.set(CONVO_MAIN_ID);
   conversationFocus.set({});
   const info = await invoke<BackendSessionInfo>("ensure_local_session");
@@ -758,7 +795,6 @@ async function bootDefaultSession() {
       }),
     ),
   );
-  // Ensure the ensure_local session is stamped Main even if list order differs.
   sessions.update((list) =>
     list.map((s) =>
       s.id === session.id ? { ...s, conversationId: CONVO_MAIN_ID } : s,
@@ -814,6 +850,86 @@ export async function createConversationWithSession(
   const session = await createSession();
   scheduleSaveAppState(200);
   return { conversation, session };
+}
+
+/** New group + switch + one conversation + one shell. */
+export async function createGroupWithWorkspace(
+  name?: string,
+): Promise<{ group: Group; conversation: Conversation; session: SessionInfo }> {
+  const group = createGroup(name);
+  const { conversation, session } = await createConversationWithSession("Main");
+  scheduleSaveAppState(200);
+  return { group, conversation, session };
+}
+
+/**
+ * Delete a group and all of its conversations/sessions.
+ * If it was the last group, seed a fresh Home workspace.
+ */
+export async function deleteGroup(groupId: string): Promise<void> {
+  const group = get(groups).find((g) => g.id === groupId);
+  if (!group) throw new Error("Group not found");
+
+  const convos = conversationsInGroup(groupId);
+  const sess = get(sessions).filter((s) =>
+    convos.some((c) => c.id === s.conversationId),
+  );
+  const blocking = sess.filter(
+    (s) => sessionIsTui(s) || s.activity === "busy" || getSessionTurn(s.id),
+  );
+  const wasLast = get(groups).length <= 1;
+
+  const busyNote =
+    blocking.length > 0
+      ? `\n\n${blocking.length} session(s) still busy or in TUI will be killed.`
+      : "";
+  const lastNote = wasLast
+    ? `\n\nThis is the last group — a new Home group will be created.`
+    : "";
+  const ok = window.confirm(
+    `Delete group “${group.name}” and ${convos.length} conversation(s)` +
+      (sess.length ? ` / ${sess.length} session(s)` : "") +
+      `?${busyNote}${lastNote}\n\nChat history for this group will be discarded.`,
+  );
+  if (!ok) return;
+
+  // Leave this group in the UI before tearing it down (if another exists).
+  if (get(activeGroupId) === groupId) {
+    const other = get(groups).find((g) => g.id !== groupId);
+    if (other) setActiveGroup(other.id);
+  }
+
+  for (const s of sess) {
+    try {
+      await invoke("close_session", { sessionId: s.id });
+    } catch (err) {
+      console.error("close_session during group delete", s.id, err);
+    }
+    forgetSessionLocally(s.id);
+  }
+
+  const convoIds = new Set(convos.map((c) => c.id));
+  conversations.update((all) => all.filter((c) => c.groupId !== groupId));
+  conversationFocus.update((map) => {
+    const next = { ...map };
+    for (const id of convoIds) delete next[id];
+    return next;
+  });
+  messages.update((all) => all.filter((m) => !convoIds.has(m.conversationId)));
+
+  removeGroupRecord(groupId);
+
+  if (get(groups).length === 0) {
+    try {
+      await createGroupWithWorkspace("Home");
+    } catch (err) {
+      console.error("recreate group after last delete failed", err);
+      pushToast("warn", "Deleted last group but failed to create a replacement.");
+    }
+  }
+
+  backendError.set(null);
+  scheduleSaveAppState(100);
 }
 
 /**

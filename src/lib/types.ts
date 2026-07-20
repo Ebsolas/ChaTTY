@@ -5,19 +5,45 @@ export type ProcessStatus = "starting" | "running" | "exited";
 export type SessionActivity = "idle" | "busy" | "tui";
 export type TurnStatus = "running" | "ok" | "error" | "tui";
 
-/** Default conversation ids for first boot / v1 migration. */
+/** Default ids for first boot / migration. */
+export const GROUP_DEFAULT_ID = "group-default";
 export const CONVO_MAIN_ID = "convo-main";
 export const CONVO_SCRATCH_ID = "convo-scratch";
+
+export const GROUP_COLORS = [
+  "#4c8dff",
+  "#3dd68c",
+  "#f0b429",
+  "#e35d6a",
+  "#c792ea",
+  "#89ddff",
+  "#ff9f43",
+  "#a0a8b8",
+] as const;
+
+export type Group = {
+  id: string;
+  name: string;
+  /** CSS color for monogram circle. */
+  color: string;
+};
 
 export type Conversation = {
   id: string;
   name: string;
+  groupId: string;
 };
 
-/** Seeded on empty state; users can rename/delete/reorder freely after. */
+export const DEFAULT_GROUP: Group = {
+  id: GROUP_DEFAULT_ID,
+  name: "Home",
+  color: GROUP_COLORS[0],
+};
+
+/** Seeded under the default group on empty state. */
 export const DEFAULT_CONVERSATIONS: Conversation[] = [
-  { id: CONVO_MAIN_ID, name: "Main" },
-  { id: CONVO_SCRATCH_ID, name: "Scratch" },
+  { id: CONVO_MAIN_ID, name: "Main", groupId: GROUP_DEFAULT_ID },
+  { id: CONVO_SCRATCH_ID, name: "Scratch", groupId: GROUP_DEFAULT_ID },
 ];
 
 /** @deprecated use DEFAULT_CONVERSATIONS */
@@ -28,6 +54,17 @@ export type ConversationFocus = {
   stickySessionId: string | null;
   activeSessionId: string | null;
 };
+
+/** Per-group focus: which conversation was last active. */
+export type GroupFocus = {
+  activeConversationId: string | null;
+};
+
+/** Monogram letter for a group name (first alphanumeric, else "?"). */
+export function groupMonogram(name: string): string {
+  const m = name.trim().match(/[A-Za-z0-9]/);
+  return (m?.[0] ?? "?").toUpperCase();
+}
 
 export interface SessionInfo {
   id: string;

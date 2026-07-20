@@ -12,6 +12,8 @@ import type {
   ChatMessage,
   Conversation,
   ConversationFocus,
+  Group,
+  GroupFocus,
   SessionActivity,
   SessionInfo,
   TurnStatus,
@@ -19,6 +21,9 @@ import type {
 import {
   CONVO_MAIN_ID,
   DEFAULT_CONVERSATIONS,
+  DEFAULT_GROUP,
+  GROUP_COLORS,
+  GROUP_DEFAULT_ID,
 } from "./types";
 
 export const sessions = writable<SessionInfo[]>([]);
@@ -29,11 +34,28 @@ export const backendError = writable<string | null>(null);
 export const connected = writable(false);
 export const expandedSessionId = writable<string | null>(null);
 
+/** Ordered groups (create / rename / delete / reorder). */
+export const groups = writable<Group[]>([{ ...DEFAULT_GROUP }]);
+export const activeGroupId = writable<string>(GROUP_DEFAULT_ID);
+export const groupFocus = writable<Record<string, GroupFocus>>({});
+
 /** Ordered conversation list (create / rename / delete / reorder). */
-export const conversations = writable<Conversation[]>([...DEFAULT_CONVERSATIONS]);
+export const conversations = writable<Conversation[]>(
+  DEFAULT_CONVERSATIONS.map((c) => ({ ...c })),
+);
 export const activeConversationId = writable<string>(CONVO_MAIN_ID);
 /** Focus snapshot per conversation for unload/restore on switch. */
 export const conversationFocus = writable<Record<string, ConversationFocus>>({});
+
+export const activeGroup = derived(
+  [groups, activeGroupId],
+  ([$groups, $id]) => $groups.find((g) => g.id === $id) ?? $groups[0] ?? null,
+);
+
+export const activeGroupConversations = derived(
+  [conversations, activeGroupId],
+  ([$convos, $gid]) => $convos.filter((c) => c.groupId === $gid),
+);
 
 export const activeSessions = derived(
   [sessions, activeConversationId],
@@ -49,7 +71,12 @@ export function sessionsInConversation(conversationId: string): SessionInfo[] {
   return get(sessions).filter((s) => s.conversationId === conversationId);
 }
 
-function snapshotFocus(convoId: string) {
+export function conversationsInGroup(groupId: string): Conversation[] {
+  return get(conversations).filter((c) => c.groupId === groupId);
+}
+
+function snapshotConvoFocus(convoId: string) {
+  if (!convoId) return;
   conversationFocus.update((map) => ({
     ...map,
     [convoId]: {
@@ -59,17 +86,32 @@ function snapshotFocus(convoId: string) {
   }));
 }
 
+function snapshotGroupFocus(groupId: string) {
+  if (!groupId) return;
+  snapshotConvoFocus(get(activeConversationId));
+  groupFocus.update((map) => ({
+    ...map,
+    [groupId]: { activeConversationId: get(activeConversationId) || null },
+  }));
+}
+
 /**
  * Unload previous conversation UI focus and restore the target.
  * PTYs keep running; only sticky/active/expanded selection changes.
  */
 export function setActiveConversation(conversationId: string) {
   const list = get(conversations);
-  if (!list.some((c) => c.id === conversationId)) return;
+  const target = list.find((c) => c.id === conversationId);
+  if (!target) return;
   const prev = get(activeConversationId);
   if (prev === conversationId) return;
 
-  if (prev && list.some((c) => c.id === prev)) snapshotFocus(prev);
+  if (prev && list.some((c) => c.id === prev)) snapshotConvoFocus(prev);
+
+  // Ensure group matches the conversation.
+  if (target.groupId && target.groupId !== get(activeGroupId)) {
+    activeGroupId.set(target.groupId);
+  }
 
   const exp = get(expandedSessionId);
   if (exp) {
@@ -98,11 +140,75 @@ export function setActiveConversation(conversationId: string) {
   activeSessionId.set(active);
 }
 
-function uniqueConversationName(base: string, excludeId?: string): string {
+/**
+ * Switch active group. Restores that group's last conversation (and session focus).
+ * PTYs in other groups keep running.
+ */
+export function setActiveGroup(groupId: string) {
+  const list = get(groups);
+  if (!list.some((g) => g.id === groupId)) return;
+  const prev = get(activeGroupId);
+  if (prev === groupId) return;
+
+  if (prev && list.some((g) => g.id === prev)) snapshotGroupFocus(prev);
+
+  activeGroupId.set(groupId);
+
+  const gFocus = get(groupFocus)[groupId];
+  const inGroup = conversationsInGroup(groupId);
+  const wanted =
+    (gFocus?.activeConversationId &&
+    inGroup.some((c) => c.id === gFocus.activeConversationId)
+      ? gFocus.activeConversationId
+      : null) ??
+    inGroup[0]?.id ??
+    null;
+
+  if (wanted) {
+    // Force restore even if same id somehow.
+    const prevConvo = get(activeConversationId);
+    if (prevConvo === wanted) {
+      // Still refresh session sticky from focus.
+      const focus = get(conversationFocus)[wanted];
+      const inConvo = sessionsInConversation(wanted);
+      const ids = new Set(inConvo.map((s) => s.id));
+      stickySessionId.set(
+        (focus?.stickySessionId && ids.has(focus.stickySessionId)
+          ? focus.stickySessionId
+          : null) ??
+          inConvo[0]?.id ??
+          null,
+      );
+      activeSessionId.set(
+        (focus?.activeSessionId && ids.has(focus.activeSessionId)
+          ? focus.activeSessionId
+          : null) ?? get(stickySessionId),
+      );
+      const exp = get(expandedSessionId);
+      if (exp) {
+        const sess = get(sessions).find((s) => s.id === exp);
+        if (!sess || sess.conversationId !== wanted) expandedSessionId.set(null);
+      }
+    } else {
+      setActiveConversation(wanted);
+    }
+  } else {
+    expandedSessionId.set(null);
+    stickySessionId.set(null);
+    activeSessionId.set(null);
+    activeConversationId.set("");
+  }
+}
+
+function uniqueConversationName(
+  base: string,
+  groupId: string,
+  excludeId?: string,
+): string {
   const cleaned = base.trim() || "Conversation";
   const names = new Set(
     get(conversations)
-      .filter((c) => c.id !== excludeId)
+      .filter((c) => c.groupId === groupId && c.id !== excludeId)
       .map((c) => c.name.toLowerCase()),
   );
   if (!names.has(cleaned.toLowerCase())) return cleaned;
@@ -113,12 +219,34 @@ function uniqueConversationName(base: string, excludeId?: string): string {
   return `${cleaned} ${crypto.randomUUID().slice(0, 6)}`;
 }
 
-/** Create a conversation and switch to it (no session yet — caller may spawn one). */
+function uniqueGroupName(base: string, excludeId?: string): string {
+  const cleaned = base.trim() || "Group";
+  const names = new Set(
+    get(groups)
+      .filter((g) => g.id !== excludeId)
+      .map((g) => g.name.toLowerCase()),
+  );
+  if (!names.has(cleaned.toLowerCase())) return cleaned;
+  for (let n = 2; n < 1000; n++) {
+    const candidate = `${cleaned} ${n}`;
+    if (!names.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${cleaned} ${crypto.randomUUID().slice(0, 6)}`;
+}
+
+function nextGroupColor(): string {
+  const n = get(groups).length;
+  return GROUP_COLORS[n % GROUP_COLORS.length]!;
+}
+
+/** Create a conversation in the active group and switch to it. */
 export function createConversation(name?: string): Conversation {
+  const groupId = get(activeGroupId) || GROUP_DEFAULT_ID;
   const id = `convo-${crypto.randomUUID()}`;
   const convo: Conversation = {
     id,
-    name: uniqueConversationName(name?.trim() || "Conversation"),
+    name: uniqueConversationName(name?.trim() || "Conversation", groupId),
+    groupId,
   };
   conversations.update((list) => [...list, convo]);
   conversationFocus.update((map) => ({
@@ -138,7 +266,10 @@ export function renameConversation(conversationId: string, name: string): Conver
   if (next.toLowerCase() === cur.name.toLowerCase()) return cur;
 
   const taken = list.some(
-    (c) => c.id !== conversationId && c.name.toLowerCase() === next.toLowerCase(),
+    (c) =>
+      c.id !== conversationId &&
+      c.groupId === cur.groupId &&
+      c.name.toLowerCase() === next.toLowerCase(),
   );
   if (taken) throw new Error(`Name already used: ${next}`);
 
@@ -151,16 +282,19 @@ export function renameConversation(conversationId: string, name: string): Conver
 
 /**
  * Remove a conversation from the list (sessions/messages must already be cleaned up).
- * Switches to another convo if available; leaves zero conversations if it was the last
- * (caller should seed a replacement).
+ * Prefers another conversation in the same group as fallback.
  */
 export function removeConversationRecord(conversationId: string): void {
   const list = get(conversations);
-  if (!list.some((c) => c.id === conversationId)) {
+  const cur = list.find((c) => c.id === conversationId);
+  if (!cur) {
     throw new Error("Conversation not found");
   }
 
-  const fallback = list.find((c) => c.id !== conversationId) ?? null;
+  const fallback =
+    list.find((c) => c.id !== conversationId && c.groupId === cur.groupId) ??
+    list.find((c) => c.id !== conversationId) ??
+    null;
   if (get(activeConversationId) === conversationId) {
     if (fallback) {
       setActiveConversation(fallback.id);
@@ -181,25 +315,133 @@ export function removeConversationRecord(conversationId: string): void {
   messages.update((all) => all.filter((m) => m.conversationId !== conversationId));
 }
 
-/** Reorder by moving `conversationId` to `toIndex` (0-based). */
+/** Reorder conversation within its group (toIndex is index in the full list after move). */
 export function reorderConversation(conversationId: string, toIndex: number): void {
-  const list = get(conversations);
-  const from = list.findIndex((c) => c.id === conversationId);
+  // Reorder only among siblings in the same group for the rail UX.
+  const all = get(conversations);
+  const item = all.find((c) => c.id === conversationId);
+  if (!item) return;
+  const groupId = item.groupId;
+  const siblings = all.filter((c) => c.groupId === groupId);
+  const fromSib = siblings.findIndex((c) => c.id === conversationId);
+  if (fromSib < 0) return;
+  const clamped = Math.max(0, Math.min(siblings.length - 1, toIndex));
+  if (fromSib === clamped) return;
+
+  const nextSibs = [...siblings];
+  const [moved] = nextSibs.splice(fromSib, 1);
+  nextSibs.splice(clamped, 0, moved!);
+
+  // Rebuild full list: replace this group's slice with reordered siblings.
+  const out: Conversation[] = [];
+  let replaced = false;
+  for (const c of all) {
+    if (c.groupId !== groupId) {
+      out.push(c);
+    } else if (!replaced) {
+      out.push(...nextSibs);
+      replaced = true;
+    }
+  }
+  if (!replaced) out.push(...nextSibs);
+  conversations.set(out);
+}
+
+/** Move conversation up (-1) or down (+1) within its group. */
+export function moveConversation(conversationId: string, delta: -1 | 1): void {
+  const item = get(conversations).find((c) => c.id === conversationId);
+  if (!item) return;
+  const siblings = conversationsInGroup(item.groupId);
+  const from = siblings.findIndex((c) => c.id === conversationId);
+  if (from < 0) return;
+  reorderConversation(conversationId, from + delta);
+}
+
+// ─── Groups CRUD ─────────────────────────────────────────────────────────────
+
+export function createGroup(name?: string, color?: string): Group {
+  const id = `group-${crypto.randomUUID()}`;
+  const group: Group = {
+    id,
+    name: uniqueGroupName(name?.trim() || "Group"),
+    color: color && color.trim() ? color.trim() : nextGroupColor(),
+  };
+  groups.update((list) => [...list, group]);
+  groupFocus.update((map) => ({
+    ...map,
+    [id]: { activeConversationId: null },
+  }));
+  setActiveGroup(id);
+  return group;
+}
+
+export function renameGroup(groupId: string, name: string): Group {
+  const next = name.trim();
+  if (!next) throw new Error("Name cannot be empty");
+  const list = get(groups);
+  const cur = list.find((g) => g.id === groupId);
+  if (!cur) throw new Error("Group not found");
+  if (next.toLowerCase() === cur.name.toLowerCase()) return cur;
+  const taken = list.some(
+    (g) => g.id !== groupId && g.name.toLowerCase() === next.toLowerCase(),
+  );
+  if (taken) throw new Error(`Name already used: ${next}`);
+  const updated = { ...cur, name: next };
+  groups.update((all) => all.map((g) => (g.id === groupId ? updated : g)));
+  return updated;
+}
+
+export function setGroupColor(groupId: string, color: string): Group {
+  const cur = get(groups).find((g) => g.id === groupId);
+  if (!cur) throw new Error("Group not found");
+  const updated = { ...cur, color };
+  groups.update((all) => all.map((g) => (g.id === groupId ? updated : g)));
+  return updated;
+}
+
+/** Remove group record (convos/sessions must already be cleaned). */
+export function removeGroupRecord(groupId: string): void {
+  const list = get(groups);
+  if (!list.some((g) => g.id === groupId)) {
+    throw new Error("Group not found");
+  }
+  const fallback = list.find((g) => g.id !== groupId) ?? null;
+  if (get(activeGroupId) === groupId) {
+    if (fallback) {
+      setActiveGroup(fallback.id);
+    } else {
+      activeGroupId.set("");
+      activeConversationId.set("");
+      stickySessionId.set(null);
+      activeSessionId.set(null);
+      expandedSessionId.set(null);
+    }
+  }
+  groups.update((all) => all.filter((g) => g.id !== groupId));
+  groupFocus.update((map) => {
+    const next = { ...map };
+    delete next[groupId];
+    return next;
+  });
+}
+
+export function reorderGroup(groupId: string, toIndex: number): void {
+  const list = get(groups);
+  const from = list.findIndex((g) => g.id === groupId);
   if (from < 0) return;
   const clamped = Math.max(0, Math.min(list.length - 1, toIndex));
   if (from === clamped) return;
   const next = [...list];
   const [item] = next.splice(from, 1);
   next.splice(clamped, 0, item!);
-  conversations.set(next);
+  groups.set(next);
 }
 
-/** Move conversation up (-1) or down (+1) in the rail. */
-export function moveConversation(conversationId: string, delta: -1 | 1): void {
-  const list = get(conversations);
-  const from = list.findIndex((c) => c.id === conversationId);
+export function moveGroup(groupId: string, delta: -1 | 1): void {
+  const list = get(groups);
+  const from = list.findIndex((g) => g.id === groupId);
   if (from < 0) return;
-  reorderConversation(conversationId, from + delta);
+  reorderGroup(groupId, from + delta);
 }
 
 /** Soft notices (warnings/info) — bottom-right balloon, not the red error strip. */

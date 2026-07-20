@@ -75,23 +75,30 @@ npm run tauri dev
 
 Composer **↑ / ↓** recalls command history (persisted in localStorage). Each session has its own chat capture, so a TUI or long job on `@local` does not block `@local-2`.
 
-### Conversations
+### Groups & conversations
 
-Left rail lists **conversations** (default **Main** + **Scratch**). Each has its own chat history and sessions.
+Hierarchy: **Group → Conversation → Sessions + chat**.
 
-| Action | How |
-|--------|-----|
-| Switch | Click a row (UI unloads/restores; PTYs keep running) |
-| New | `+` in the Conversations header (also spawns a session) |
-| Rename | Double-click, or context menu → Rename |
-| Reorder | Drag rows, or context menu → Move up/down |
-| Delete | Context menu → Delete… (kills that convo’s sessions; confirms if busy/TUI). Deleting the **last** conversation auto-creates a fresh **Main** with a new session. |
+| Rail | Content |
+|------|---------|
+| Far left (thin) | **Groups** as monogram circles (initial + color) |
+| Next | **Conversations** in the active group; header shows the **group name** |
+| Right | **Sessions** for the active conversation |
 
-Sessions may all be closed (empty conversation); use **+** on the sessions rail to add one. Background work in another conversation still finishes with a toast balloon.
+| Action | Groups | Conversations |
+|--------|--------|----------------|
+| Switch | Click icon | Click row |
+| New | `+` under icons (seeds conversation + session) | `+` in header (seeds a session) |
+| Rename | Click the **group name** in the conversations header | Double-click / context menu |
+| Color | Context menu → Color… | — |
+| Reorder | Drag / Move up·down | Drag / Move up·down |
+| Delete | Context menu (kills nested sessions); last group reseeds **Home** | Context menu; last conversation reseeds **Main** |
+
+Switching groups/conversations **unloads UI** only — PTYs keep running. Background finishes toast when you’re in another conversation.
 
 ### Persistence
 
-On quit/restart Chatty restores **conversations**, session **names, order, cwd, sticky target, and chat history** from:
+On quit/restart Chatty restores **groups, conversations**, session **names, order, cwd, sticky target, and chat history** from:
 
 ```text
 ~/.config/chatty/state.json

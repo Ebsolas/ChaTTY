@@ -7,12 +7,16 @@
   import ChatView from "$lib/components/ChatView.svelte";
   import Composer from "$lib/components/Composer.svelte";
   import ConversationsRail from "$lib/components/ConversationsRail.svelte";
+  import GroupsRail from "$lib/components/GroupsRail.svelte";
   import SessionsRail from "$lib/components/SessionsRail.svelte";
   import SessionTerminal from "$lib/components/SessionTerminal.svelte";
   import ToastStack from "$lib/components/ToastStack.svelte";
   import { matchAction, type ActionId } from "$lib/keybindings";
   import {
     activeConversationId,
+    activeGroup,
+    activeGroupConversations,
+    activeGroupId,
     activeMessages,
     activeSessionId,
     activeSessions,
@@ -23,12 +27,18 @@
     connected,
     conversations,
     expandedSessionId,
+    groups,
     keybindings,
     moveConversation,
+    moveGroup,
     renameConversation,
+    renameGroup,
     reorderConversation,
+    reorderGroup,
     sessions,
     setActiveConversation,
+    setActiveGroup,
+    setGroupColor,
     setKeybindings,
     stickySessionId,
   } from "$lib/stores";
@@ -37,8 +47,10 @@
     closeSession,
     controlFromKeyboard,
     createConversationWithSession,
+    createGroupWithWorkspace,
     createSession,
     deleteConversation,
+    deleteGroup,
     initSessionBridge,
     openExpandedSession,
     persistAppStateNow,
@@ -52,8 +64,10 @@
   let booting = $state(true);
   let creatingSession = $state(false);
   let creatingConversation = $state(false);
+  let creatingGroup = $state(false);
   let renameTargetId = $state<string | null>(null);
   let renameConvoTargetId = $state<string | null>(null);
+
   /** Prevent re-entrant close handling while we confirm/save/destroy. */
   let closingApp = $state(false);
 
@@ -360,6 +374,34 @@
     renameConversation(id, name);
   }
 
+  async function handleCreateGroup() {
+    if (creatingGroup) return;
+    creatingGroup = true;
+    renameConvoTargetId = null;
+    backendError.set(null);
+    try {
+      await createGroupWithWorkspace();
+    } catch (err) {
+      backendError.set(String(err));
+    } finally {
+      creatingGroup = false;
+    }
+  }
+
+  async function handleDeleteGroup(id: string) {
+    try {
+      await deleteGroup(id);
+    } catch (err) {
+      backendError.set(String(err));
+    }
+  }
+
+  async function handleRenameGroup(name: string) {
+    const id = get(activeGroupId);
+    if (!id) return;
+    renameGroup(id, name);
+  }
+
   async function handleCloseSession(id: string) {
     try {
       if (renameTargetId === id) renameTargetId = null;
@@ -445,8 +487,26 @@
   </header>
 
   <main class="shell">
-    <ConversationsRail
+    <GroupsRail
+      groups={$groups}
+      activeId={$activeGroupId}
       conversations={$conversations}
+      sessions={$sessions}
+      creating={creatingGroup}
+      onSelect={(id) => {
+        renameConvoTargetId = null;
+        setActiveGroup(id);
+      }}
+      onCreate={handleCreateGroup}
+      onDelete={handleDeleteGroup}
+      onSetColor={(id, color) => setGroupColor(id, color)}
+      onReorder={(id, toIndex) => reorderGroup(id, toIndex)}
+      onMove={(id, delta) => moveGroup(id, delta)}
+    />
+
+    <ConversationsRail
+      groupName={$activeGroup?.name ?? "Home"}
+      conversations={$activeGroupConversations}
       activeId={$activeConversationId}
       sessions={$sessions}
       creating={creatingConversation}
@@ -464,6 +524,7 @@
       onCancelRename={() => {
         renameConvoTargetId = null;
       }}
+      onRenameGroup={handleRenameGroup}
       onReorder={(id, toIndex) => reorderConversation(id, toIndex)}
       onMove={(id, delta) => moveConversation(id, delta)}
     />
@@ -553,9 +614,9 @@
   /*
    * Desktop shell: 100vh + named grid.
    *
-   *   "top"    "top"      "top"
-   *   "convos" "chatTop"  "sessionRail"
-   *   "convos" "composer" "composer"
+   *   "top"    "top"    "top"      "top"
+   *   "groups" "convos" "chatTop"  "sessionRail"
+   *   "groups" "convos" "composer" "composer"
    */
   .app {
     position: fixed;
@@ -564,12 +625,12 @@
     height: 100vh;
     overflow: hidden;
     display: grid;
-    grid-template-columns: 200px minmax(0, 1fr) 240px;
+    grid-template-columns: 52px 200px minmax(0, 1fr) 240px;
     grid-template-rows: auto minmax(0, 1fr) auto;
     grid-template-areas:
-      "top      top      top"
-      "convos   chatTop  sessionRail"
-      "convos   composer composer";
+      "top     top     top      top"
+      "groups  convos  chatTop  sessionRail"
+      "groups  convos  composer composer";
     background: var(--bg, #0f1115);
     color: var(--text, #e8eaed);
   }
@@ -587,6 +648,14 @@
   /* Children of .shell become .app grid items */
   .shell {
     display: contents;
+  }
+
+  .shell > :global(aside.groups-rail) {
+    grid-area: groups;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+    z-index: 2;
   }
 
   .shell > :global(aside.conversations-rail) {
@@ -617,10 +686,10 @@
     z-index: 2;
   }
 
-  /* Session terminal: middle row, chat + sessions only (columns 2–3) */
+  /* Session terminal: middle row, chat + sessions only (columns 3–4) */
   .shell > :global(.overlay) {
     grid-row: 2;
-    grid-column: 2 / -1;
+    grid-column: 3 / -1;
     z-index: 30;
     min-height: 0;
     min-width: 0;

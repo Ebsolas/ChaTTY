@@ -164,10 +164,12 @@ pub struct SavedSession {
     pub conversation_id: Option<String>,
 }
 
-/// Opaque conversation / focus / message blobs (frontend-owned shapes).
+/// Opaque blobs (frontend-owned shapes).
 pub type SavedMessage = serde_json::Value;
 pub type SavedConversation = serde_json::Value;
 pub type SavedConversationFocus = serde_json::Value;
+pub type SavedGroup = serde_json::Value;
+pub type SavedGroupFocus = serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -185,6 +187,12 @@ pub struct AppStateFile {
     #[serde(default)]
     pub active_conversation_id: Option<String>,
     #[serde(default)]
+    pub active_group_id: Option<String>,
+    #[serde(default)]
+    pub groups: Vec<SavedGroup>,
+    #[serde(default)]
+    pub group_focus: Option<SavedGroupFocus>,
+    #[serde(default)]
     pub conversations: Vec<SavedConversation>,
     #[serde(default)]
     pub conversation_focus: Option<SavedConversationFocus>,
@@ -195,18 +203,21 @@ pub struct AppStateFile {
 }
 
 fn default_state_version() -> u32 {
-    2
+    3
 }
 
 impl Default for AppStateFile {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             saved_at: 0,
             sticky_session_id: None,
             active_session_id: None,
             expanded_session_id: None,
             active_conversation_id: None,
+            active_group_id: None,
+            groups: Vec::new(),
+            group_focus: None,
             conversations: Vec::new(),
             conversation_focus: None,
             sessions: Vec::new(),
@@ -255,8 +266,8 @@ pub fn save_app_state(mut state: AppStateFile) -> Result<String, String> {
             .split_off(state.messages.len() - MAX_MESSAGES);
     }
     // Frontend owns schema evolution; accept whatever version it sends.
-    if state.version < 2 {
-        state.version = 2;
+    if state.version < 3 {
+        state.version = 3;
     }
     state.saved_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

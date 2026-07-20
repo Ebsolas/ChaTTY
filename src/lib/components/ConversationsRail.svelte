@@ -2,6 +2,8 @@
   import type { Conversation, SessionInfo } from "$lib/types";
 
   interface Props {
+    /** Active group name shown in the header (click / double-click to rename). */
+    groupName?: string;
     conversations: Conversation[];
     activeId: string;
     sessions: SessionInfo[];
@@ -14,11 +16,14 @@
     onRename?: (id: string, name: string) => void | Promise<void>;
     onBeginRename?: (id: string) => void;
     onCancelRename?: () => void;
+    /** Rename the active group (header title). */
+    onRenameGroup?: (name: string) => void | Promise<void>;
     onReorder?: (id: string, toIndex: number) => void;
     onMove?: (id: string, delta: -1 | 1) => void;
   }
 
   let {
+    groupName = "Home",
     conversations,
     activeId,
     sessions,
@@ -30,6 +35,7 @@
     onRename,
     onBeginRename,
     onCancelRename,
+    onRenameGroup,
     onReorder,
     onMove,
   }: Props = $props();
@@ -38,6 +44,13 @@
   let renameError = $state<string | null>(null);
   let renaming = $state(false);
   let inputEl: HTMLInputElement | undefined = $state();
+
+  /** Inline edit of the group name in the pane header. */
+  let editingGroup = $state(false);
+  let groupEditValue = $state("");
+  let groupRenameError = $state<string | null>(null);
+  let groupRenaming = $state(false);
+  let groupInputEl: HTMLInputElement | undefined = $state();
 
   type MenuState = { conversationId: string; x: number; y: number } | null;
   let menu = $state<MenuState>(null);
@@ -94,6 +107,7 @@
 
   function beginRename(id: string) {
     closeMenu();
+    cancelGroupRename();
     onBeginRename?.(id);
   }
 
@@ -102,6 +116,71 @@
     renameError = null;
     renaming = false;
   }
+
+  function beginGroupRename() {
+    if (!onRenameGroup) return;
+    closeMenu();
+    onCancelRename?.();
+    editingGroup = true;
+    groupEditValue = groupName;
+    groupRenameError = null;
+    groupRenaming = false;
+    requestAnimationFrame(() => {
+      groupInputEl?.focus();
+      groupInputEl?.select();
+    });
+  }
+
+  function cancelGroupRename() {
+    editingGroup = false;
+    groupEditValue = "";
+    groupRenameError = null;
+    groupRenaming = false;
+  }
+
+  async function commitGroupRename() {
+    if (groupRenaming || !editingGroup) return;
+    const next = groupEditValue.trim();
+    if (!next) {
+      groupRenameError = "Name required";
+      return;
+    }
+    if (next.toLowerCase() === groupName.toLowerCase()) {
+      cancelGroupRename();
+      return;
+    }
+    groupRenaming = true;
+    groupRenameError = null;
+    try {
+      await onRenameGroup?.(next);
+      cancelGroupRename();
+    } catch (err) {
+      groupRenameError = String(err).replace(/^Error:\s*/, "");
+      groupRenaming = false;
+      requestAnimationFrame(() => groupInputEl?.focus());
+    }
+  }
+
+  function onGroupEditKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      e.stopPropagation();
+      void commitGroupRename();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelGroupRename();
+    }
+  }
+
+  // Keep header edit value in sync when group switches while not editing.
+  $effect(() => {
+    void groupName;
+    if (!editingGroup) {
+      groupEditValue = groupName;
+      groupRenameError = null;
+    }
+  });
 
   async function commitRename(conversationId: string) {
     if (renaming) return;
@@ -237,7 +316,33 @@
 
 <aside class="conversations-rail" aria-label="Conversations">
   <div class="pane-header">
-    <span>Conversations</span>
+    {#if editingGroup}
+      <div class="group-rename">
+        <input
+          bind:this={groupInputEl}
+          class="group-rename-input"
+          bind:value={groupEditValue}
+          disabled={groupRenaming}
+          maxlength={48}
+          spellcheck="false"
+          aria-label="Group name"
+          onkeydown={onGroupEditKeydown}
+          onblur={() => void commitGroupRename()}
+        />
+        {#if groupRenameError}
+          <span class="group-rename-error">{groupRenameError}</span>
+        {/if}
+      </div>
+    {:else}
+      <button
+        type="button"
+        class="group-title"
+        title={`${groupName} — click to rename`}
+        onclick={beginGroupRename}
+      >
+        {groupName}
+      </button>
+    {/if}
     <button
       type="button"
       class="add-btn"
@@ -419,11 +524,67 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 0.5rem;
     padding: 0.75rem 0.85rem;
     border-bottom: 1px solid var(--border, #232833);
     font-size: 0.9rem;
     color: var(--muted, #8b93a7);
     flex-shrink: 0;
+  }
+
+  .group-title {
+    flex: 1 1 0;
+    min-width: 0;
+    margin: 0;
+    padding: 0.15rem 0.25rem;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    font: inherit;
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--text, #e8eaed);
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: text;
+  }
+
+  .group-title:hover {
+    border-color: var(--border, #232833);
+    background: var(--bg-elevated, #161a22);
+  }
+
+  .group-rename {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .group-rename-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.25rem 0.4rem;
+    border-radius: 6px;
+    border: 1px solid var(--accent, #4c8dff);
+    background: var(--bg-elevated, #161a22);
+    color: var(--text, #e8eaed);
+    font: inherit;
+    font-weight: 600;
+    font-size: 0.95rem;
+  }
+
+  .group-rename-input:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #4c8dff) 35%, transparent);
+  }
+
+  .group-rename-error {
+    font-size: 0.7rem;
+    color: var(--danger, #e35d6a);
   }
 
   .add-btn {

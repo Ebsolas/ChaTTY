@@ -1,15 +1,18 @@
 /**
- * Persist conversations + sessions + chat history to ~/.config/chatty/state.json.
+ * Persist groups + conversations + sessions + chat to ~/.config/chatty/state.json.
  */
 
 import { invoke } from "@tauri-apps/api/core";
 import { get } from "svelte/store";
 import {
   activeConversationId,
+  activeGroupId,
   activeSessionId,
   conversationFocus,
   conversations,
   expandedSessionId,
+  groupFocus,
+  groups,
   messages,
   sessions,
   stickySessionId,
@@ -18,10 +21,15 @@ import type {
   ChatMessage,
   Conversation,
   ConversationFocus,
+  Group,
+  GroupFocus,
 } from "./types";
 import {
   CONVO_MAIN_ID,
   DEFAULT_CONVERSATIONS,
+  DEFAULT_GROUP,
+  GROUP_COLORS,
+  GROUP_DEFAULT_ID,
 } from "./types";
 
 export type SavedSession = {
@@ -38,8 +46,10 @@ export type AppStateFile = {
   stickySessionId: string | null;
   activeSessionId: string | null;
   expandedSessionId: string | null;
-  /** v2+ */
   activeConversationId?: string | null;
+  activeGroupId?: string | null;
+  groups?: Group[];
+  groupFocus?: Record<string, GroupFocus>;
   conversations?: Conversation[];
   conversationFocus?: Record<string, ConversationFocus>;
   sessions: SavedSession[];
@@ -47,11 +57,10 @@ export type AppStateFile = {
 };
 
 const MAX_MESSAGES = 500;
-const STATE_VERSION = 2;
+const STATE_VERSION = 3;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let saving = false;
 let pendingSave = false;
-/** When true, skip autosave so boot/teardown cannot wipe disk with empty stores. */
 let persistencePaused = false;
 
 export function pausePersistence() {
@@ -70,8 +79,13 @@ export async function loadAppState(): Promise<AppStateFile | null> {
   try {
     const state = await invoke<AppStateFile>("load_app_state");
     if (!state) return null;
-    // Treat empty file / no sessions and no convos as "fresh".
-    if (!state.sessions?.length && !(state.conversations?.length)) return null;
+    if (
+      !state.sessions?.length &&
+      !(state.conversations?.length) &&
+      !(state.groups?.length)
+    ) {
+      return null;
+    }
     return migrateAppState(state);
   } catch (err) {
     console.error("load_app_state failed", err);
@@ -79,21 +93,47 @@ export async function loadAppState(): Promise<AppStateFile | null> {
   }
 }
 
-/** Normalize conversations + stamp conversationId on legacy rows. */
+/** Normalize groups/conversations; migrate v1/v2 → v3. */
 export function migrateAppState(raw: AppStateFile): AppStateFile {
-  // v2+ keeps user order; empty / v1 seeds Main + Scratch.
-  const convos =
-    raw.conversations?.length && raw.version >= 2
-      ? normalizeConversationList(raw.conversations)
-      : [...DEFAULT_CONVERSATIONS];
+  let groupList: Group[];
+  if (raw.groups?.length && raw.version >= 3) {
+    groupList = normalizeGroupList(raw.groups);
+  } else {
+    groupList = [{ ...DEFAULT_GROUP }];
+  }
+
+  const fallbackGroupId = groupList[0]?.id ?? GROUP_DEFAULT_ID;
+
+  let convos: Conversation[];
+  if (raw.conversations?.length && raw.version >= 2) {
+    convos = normalizeConversationList(raw.conversations, fallbackGroupId, groupList);
+  } else {
+    convos = DEFAULT_CONVERSATIONS.map((c) => ({
+      ...c,
+      groupId: fallbackGroupId,
+    }));
+  }
+
+  // Ensure every groupId on a convo exists.
+  const groupIds = new Set(groupList.map((g) => g.id));
+  convos = convos.map((c) =>
+    groupIds.has(c.groupId) ? c : { ...c, groupId: fallbackGroupId },
+  );
 
   const fallbackConvoId = convos[0]?.id ?? CONVO_MAIN_ID;
+
+  const activeGroup =
+    (raw.activeGroupId && groupIds.has(raw.activeGroupId)
+      ? raw.activeGroupId
+      : null) ?? fallbackGroupId;
 
   const activeConvo =
     (raw.activeConversationId &&
     convos.some((c) => c.id === raw.activeConversationId)
       ? raw.activeConversationId
-      : null) ?? fallbackConvoId;
+      : null) ??
+    convos.find((c) => c.groupId === activeGroup)?.id ??
+    fallbackConvoId;
 
   const sessions: SavedSession[] = (raw.sessions ?? []).map((s) => ({
     ...s,
@@ -116,42 +156,89 @@ export function migrateAppState(raw: AppStateFile): AppStateFile {
     };
   });
 
-  const focus: Record<string, ConversationFocus> = {
+  const cFocus: Record<string, ConversationFocus> = {
     ...(raw.conversationFocus ?? {}),
   };
-  // Seed focus from top-level sticky/active for the active convo if missing.
-  if (!focus[activeConvo]) {
-    focus[activeConvo] = {
+  if (!cFocus[activeConvo]) {
+    cFocus[activeConvo] = {
       stickySessionId: raw.stickySessionId ?? null,
       activeSessionId: raw.activeSessionId ?? null,
     };
   }
   for (const c of convos) {
-    if (!focus[c.id]) {
-      focus[c.id] = { stickySessionId: null, activeSessionId: null };
+    if (!cFocus[c.id]) {
+      cFocus[c.id] = { stickySessionId: null, activeSessionId: null };
+    }
+  }
+
+  const gFocus: Record<string, GroupFocus> = {
+    ...(raw.groupFocus ?? {}),
+  };
+  if (!gFocus[activeGroup]) {
+    gFocus[activeGroup] = { activeConversationId: activeConvo };
+  }
+  for (const g of groupList) {
+    if (!gFocus[g.id]) {
+      gFocus[g.id] = {
+        activeConversationId:
+          convos.find((c) => c.groupId === g.id)?.id ?? null,
+      };
     }
   }
 
   return {
     ...raw,
     version: STATE_VERSION,
+    groups: groupList,
+    activeGroupId: activeGroup,
+    groupFocus: gFocus,
     conversations: convos,
     activeConversationId: activeConvo,
-    conversationFocus: focus,
+    conversationFocus: cFocus,
     sessions,
     messages: messages as ChatMessage[],
   };
 }
 
-function normalizeConversationList(list: Conversation[]): Conversation[] {
+function normalizeGroupList(list: Group[]): Group[] {
+  const seen = new Set<string>();
+  const out: Group[] = [];
+  let colorIdx = 0;
+  for (const g of list) {
+    if (!g?.id || !g.name?.trim() || seen.has(g.id)) continue;
+    seen.add(g.id);
+    out.push({
+      id: g.id,
+      name: g.name.trim(),
+      color:
+        typeof g.color === "string" && g.color.trim()
+          ? g.color.trim()
+          : GROUP_COLORS[colorIdx++ % GROUP_COLORS.length]!,
+    });
+  }
+  return out.length ? out : [{ ...DEFAULT_GROUP }];
+}
+
+function normalizeConversationList(
+  list: Conversation[],
+  fallbackGroupId: string,
+  groupList: Group[],
+): Conversation[] {
+  const groupIds = new Set(groupList.map((g) => g.id));
   const seen = new Set<string>();
   const out: Conversation[] = [];
   for (const c of list) {
     if (!c?.id || !c.name?.trim() || seen.has(c.id)) continue;
     seen.add(c.id);
-    out.push({ id: c.id, name: c.name.trim() });
+    const gid =
+      typeof c.groupId === "string" && groupIds.has(c.groupId)
+        ? c.groupId
+        : fallbackGroupId;
+    out.push({ id: c.id, name: c.name.trim(), groupId: gid });
   }
-  return out.length ? out : [...DEFAULT_CONVERSATIONS];
+  return out.length
+    ? out
+    : DEFAULT_CONVERSATIONS.map((c) => ({ ...c, groupId: fallbackGroupId }));
 }
 
 export function scheduleSaveAppState(delayMs = 800) {
@@ -173,22 +260,35 @@ export async function flushSaveAppState(): Promise<void> {
   try {
     const list = get(sessions);
     const convos = get(conversations);
-    // Boot/teardown: don't wipe disk with a fully empty unbooted state.
-    // Empty *sessions* are valid (user closed every shell); empty everything is not.
-    if (list.length === 0 && convos.length === 0) return;
+    const groupList = get(groups);
+    if (list.length === 0 && convos.length === 0 && groupList.length === 0) return;
 
     let msgs = get(messages);
     if (msgs.length > MAX_MESSAGES) {
       msgs = msgs.slice(msgs.length - MAX_MESSAGES);
     }
 
-    // Snapshot current focus into the map before save.
     const focus = {
       ...get(conversationFocus),
-      [get(activeConversationId)]: {
-        stickySessionId: get(stickySessionId),
-        activeSessionId: get(activeSessionId),
-      },
+      ...(get(activeConversationId)
+        ? {
+            [get(activeConversationId)]: {
+              stickySessionId: get(stickySessionId),
+              activeSessionId: get(activeSessionId),
+            },
+          }
+        : {}),
+    };
+
+    const gFocus = {
+      ...get(groupFocus),
+      ...(get(activeGroupId)
+        ? {
+            [get(activeGroupId)]: {
+              activeConversationId: get(activeConversationId) || null,
+            },
+          }
+        : {}),
     };
 
     const payload: AppStateFile = {
@@ -198,6 +298,9 @@ export async function flushSaveAppState(): Promise<void> {
       activeSessionId: get(activeSessionId),
       expandedSessionId: get(expandedSessionId),
       activeConversationId: get(activeConversationId) || null,
+      activeGroupId: get(activeGroupId) || null,
+      groups: groupList,
+      groupFocus: gFocus,
       conversations: convos,
       conversationFocus: focus,
       sessions: list.map((s) => ({
@@ -230,7 +333,6 @@ export async function flushSaveAppState(): Promise<void> {
   }
 }
 
-/** Normalize messages loaded from disk for the store. */
 export function normalizeLoadedMessages(raw: unknown[]): ChatMessage[] {
   const out: ChatMessage[] = [];
   for (const item of raw) {
@@ -259,4 +361,4 @@ export function normalizeLoadedMessages(raw: unknown[]): ChatMessage[] {
   return out;
 }
 
-export { CONVO_MAIN_ID, DEFAULT_CONVERSATIONS };
+export { CONVO_MAIN_ID, DEFAULT_CONVERSATIONS, DEFAULT_GROUP, GROUP_DEFAULT_ID };
