@@ -17,6 +17,7 @@ import {
 } from "./persistence";
 import { resetAltScreenCarry, scanAltScreen } from "./termDetect";
 import {
+  activeConversationId,
   activeSessionId,
   activeTurns,
   altScreenSessions,
@@ -26,6 +27,9 @@ import {
   backendError,
   backendToSession,
   connected,
+  conversationFocus,
+  conversations,
+  createConversation,
   expandedSessionId,
   formatPtyCapture,
   getSessionTurn,
@@ -36,9 +40,11 @@ import {
   patchSessionTurn,
   pushToast,
   QUIET_MS,
+  removeConversationRecord,
   removeSession,
   sealTurn,
   sessions,
+  sessionsInConversation,
   setSessionActivity,
   setSessionProcessStatus,
   setSessionTurn,
@@ -51,6 +57,7 @@ import {
 } from "./stores";
 import type {
   BackendSessionInfo,
+  Conversation,
   SessionActivityEvent,
   SessionExitEvent,
   SessionInfo,
@@ -58,11 +65,18 @@ import type {
   SessionRemovedEvent,
   SessionStatusEvent,
 } from "./types";
+import {
+  CONVO_MAIN_ID,
+  DEFAULT_CONVERSATIONS,
+} from "./types";
 
 const unlistens: UnlistenFn[] = [];
 const storeUnsubs: Array<() => void> = [];
 const ptyScrollback = new Map<string, string>();
+/** Normal shell scrollback cap (chars). */
 const SCROLLBACK_MAX = 500_000;
+/** TUI apps (htop, vim, …) redraw constantly — keep a small ring only. */
+const SCROLLBACK_TUI_MAX = 64_000;
 
 /** Per-session quiet / max seal timers (independent captures). */
 const quietTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -125,10 +139,6 @@ export function getChatScrollback(sessionId: string): string {
 
 function appendPty(sessionId: string, text: string) {
   if (!text) return;
-  const prev = ptyScrollback.get(sessionId) ?? "";
-  let next = prev + text;
-  if (next.length > SCROLLBACK_MAX) next = next.slice(next.length - SCROLLBACK_MAX);
-  ptyScrollback.set(sessionId, next);
 
   // CSI alt-screen only for plain (non-tmux) backends. Tmux sessions use
   // pane_current_command polling as the source of truth for busy/TUI.
@@ -143,17 +153,30 @@ function appendPty(sessionId: string, text: string) {
     }
   }
 
+  const inTui =
+    get(altScreenSessions).has(sessionId) ||
+    sess?.activity === "tui" ||
+    !!sess?.tuiActive;
+
+  // Cap scrollback hard for TUIs — htop would otherwise thrash 500KB of
+  // string concat on every frame even when the terminal view is closed.
+  const prev = ptyScrollback.get(sessionId) ?? "";
+  let next = prev + text;
+  const cap = inTui ? SCROLLBACK_TUI_MAX : SCROLLBACK_MAX;
+  if (next.length > cap) next = next.slice(next.length - cap);
+  ptyScrollback.set(sessionId, next);
+
   notifyRawListeners(sessionId, text);
 
   const turn = getSessionTurn(sessionId);
   if (!turn) return;
   // Don't accumulate TUI framebuffer noise into the chat capture.
-  const inTui =
-    turn.pausedForTui ||
-    get(altScreenSessions).has(sessionId) ||
-    sess?.activity === "tui" ||
-    !!sess?.tuiActive;
-  if (inTui) return;
+  if (
+    inTui ||
+    turn.pausedForTui
+  ) {
+    return;
+  }
 
   const now = Date.now();
   const raw = turn.raw + text;
@@ -394,13 +417,45 @@ export async function initSessionBridge(): Promise<void> {
   sessions.set([]);
   expandedSessionId.set(null);
   altScreenSessions.set(new Set());
+  conversations.set([...DEFAULT_CONVERSATIONS]);
+  activeConversationId.set(CONVO_MAIN_ID);
+  conversationFocus.set({});
 
   try {
     // Listeners first so we never miss spawn output during restore.
     await attachSessionListeners();
 
     const saved = await loadAppState();
-    if (saved?.sessions?.length) {
+    if (saved && (saved.sessions?.length || saved.conversations?.length)) {
+      conversations.set(
+        saved.conversations?.length
+          ? saved.conversations
+          : [...DEFAULT_CONVERSATIONS],
+      );
+      conversationFocus.set(saved.conversationFocus ?? {});
+      const firstConvoId =
+        get(conversations)[0]?.id ?? CONVO_MAIN_ID;
+      activeConversationId.set(
+        saved.activeConversationId &&
+          get(conversations).some((c) => c.id === saved.activeConversationId)
+          ? saved.activeConversationId
+          : firstConvoId,
+      );
+
+      if (!saved.sessions?.length) {
+        // Conversations restored but no shells — leave empty; user can +.
+        messages.set(normalizeLoadedMessages(saved.messages ?? []));
+        stickySessionId.set(null);
+        activeSessionId.set(null);
+      } else {
+      // conversationId by session id for restore stamping
+      const convoBySession = new Map(
+        saved.sessions.map((s) => [
+          s.id,
+          s.conversationId ?? CONVO_MAIN_ID,
+        ]),
+      );
+
       const failures: string[] = [];
       // Sequential spawn keeps login shells from thrashing the machine,
       // but always finish the full list (don't abort on one failure).
@@ -411,7 +466,10 @@ export async function initSessionBridge(): Promise<void> {
             id: s.id ?? null,
             cwd: s.cwd ? s.cwd : null,
           });
-          const session = backendToSession(info, { starting: false });
+          const session = backendToSession(info, {
+            starting: false,
+            conversationId: s.conversationId ?? CONVO_MAIN_ID,
+          });
           upsertSession(session);
           markSessionReady(session.id);
         } catch (err) {
@@ -425,40 +483,75 @@ export async function initSessionBridge(): Promise<void> {
         await bootDefaultSession();
       } else {
         // Preserve restore order from disk, not backend map order.
-        const byId = new Map(listed.map((s) => [s.id, backendToSession(s)]));
         const ordered: SessionInfo[] = [];
         for (const s of saved.sessions) {
-          const live = byId.get(s.id);
-          if (live) ordered.push(live);
+          const live = listed.find((l) => l.id === s.id);
+          if (live) {
+            ordered.push(
+              backendToSession(live, {
+                conversationId: s.conversationId ?? CONVO_MAIN_ID,
+              }),
+            );
+          }
         }
         for (const s of listed) {
           if (!ordered.some((o) => o.id === s.id)) {
-            ordered.push(backendToSession(s));
+            ordered.push(
+              backendToSession(s, {
+                conversationId:
+                  convoBySession.get(s.id) ?? CONVO_MAIN_ID,
+              }),
+            );
           }
         }
         sessions.set(ordered);
 
+        const activeConvo = get(activeConversationId);
+        const inConvo = ordered.filter((s) => s.conversationId === activeConvo);
         const ids = new Set(ordered.map((s) => s.id));
+        const focus = get(conversationFocus)[activeConvo];
         const sticky =
+          (focus?.stickySessionId && ids.has(focus.stickySessionId)
+            ? focus.stickySessionId
+            : null) ??
           (saved.stickySessionId && ids.has(saved.stickySessionId)
             ? saved.stickySessionId
             : null) ??
+          inConvo[0]?.id ??
           ordered[0]?.id ??
           null;
         const active =
+          (focus?.activeSessionId && ids.has(focus.activeSessionId)
+            ? focus.activeSessionId
+            : null) ??
           (saved.activeSessionId && ids.has(saved.activeSessionId)
             ? saved.activeSessionId
-            : null) ?? sticky;
-        stickySessionId.set(sticky);
-        activeSessionId.set(active);
+            : null) ??
+          sticky;
+        // Only restore sticky/active if they belong to the active conversation.
+        const stickyOk =
+          sticky &&
+          ordered.find((s) => s.id === sticky)?.conversationId === activeConvo
+            ? sticky
+            : inConvo[0]?.id ?? null;
+        const activeOk =
+          active &&
+          ordered.find((s) => s.id === active)?.conversationId === activeConvo
+            ? active
+            : stickyOk;
+        stickySessionId.set(stickyOk);
+        activeSessionId.set(activeOk);
         messages.set(normalizeLoadedMessages(saved.messages ?? []));
 
-        // Re-open session terminal if it was open last time.
+        // Re-open session terminal only if it belongs to the active conversation.
         const expanded =
           saved.expandedSessionId && ids.has(saved.expandedSessionId)
             ? saved.expandedSessionId
             : null;
-        if (expanded) {
+        if (
+          expanded &&
+          ordered.find((s) => s.id === expanded)?.conversationId === activeConvo
+        ) {
           openExpandedSession(expanded);
         }
 
@@ -469,6 +562,7 @@ export async function initSessionBridge(): Promise<void> {
           );
         }
       }
+      } // end saved.sessions?.length
     } else {
       await bootDefaultSession();
     }
@@ -499,6 +593,8 @@ export async function initSessionBridge(): Promise<void> {
   storeUnsubs.push(stickySessionId.subscribe(() => scheduleSaveAppState()));
   storeUnsubs.push(activeSessionId.subscribe(() => scheduleSaveAppState()));
   storeUnsubs.push(expandedSessionId.subscribe(() => scheduleSaveAppState()));
+  storeUnsubs.push(activeConversationId.subscribe(() => scheduleSaveAppState()));
+  storeUnsubs.push(conversations.subscribe(() => scheduleSaveAppState()));
   resumePersistence();
   // Capture restored state promptly.
   scheduleSaveAppState(300);
@@ -508,7 +604,11 @@ async function attachSessionListeners(): Promise<void> {
   // Early paint: backend emits this as soon as the slot is reserved (before fork/exec).
   unlistens.push(
     await listen<BackendSessionInfo>("session-created", (event) => {
-      const session = backendToSession(event.payload, { starting: true });
+      // New spawns join the active conversation; restore paths stamp explicitly.
+      const session = backendToSession(event.payload, {
+        starting: true,
+        conversationId: get(activeConversationId) || CONVO_MAIN_ID,
+      });
       upsertSession(session);
     }),
   );
@@ -640,14 +740,30 @@ function handleTmuxActivity(ev: SessionActivityEvent) {
 }
 
 async function bootDefaultSession() {
+  conversations.set([...DEFAULT_CONVERSATIONS]);
+  activeConversationId.set(CONVO_MAIN_ID);
+  conversationFocus.set({});
   const info = await invoke<BackendSessionInfo>("ensure_local_session");
-  const session = backendToSession(info);
+  const session = backendToSession(info, { conversationId: CONVO_MAIN_ID });
   upsertSession(session);
   activeSessionId.set(session.id);
   stickySessionId.set(session.id);
   expandedSessionId.set(null);
   const listed = await invoke<BackendSessionInfo[]>("list_sessions");
-  sessions.set(listed.map((s) => backendToSession(s)));
+  sessions.set(
+    listed.map((s) =>
+      backendToSession(s, {
+        conversationId:
+          s.id === session.id ? CONVO_MAIN_ID : get(activeConversationId),
+      }),
+    ),
+  );
+  // Ensure the ensure_local session is stamped Main even if list order differs.
+  sessions.update((list) =>
+    list.map((s) =>
+      s.id === session.id ? { ...s, conversationId: CONVO_MAIN_ID } : s,
+    ),
+  );
   messages.set([]);
 }
 
@@ -671,12 +787,16 @@ function forgetSessionLocally(sessionId: string) {
  * login shell finishes forking). This promise resolves when the PTY is ready.
  */
 export async function createSession(name?: string): Promise<SessionInfo> {
+  const convoId = get(activeConversationId) || CONVO_MAIN_ID;
   const info = await invoke<BackendSessionInfo>("create_session", {
     name: name?.trim() ? name.trim() : null,
     id: null,
     cwd: null,
   });
-  const session = backendToSession(info, { starting: false });
+  const session = backendToSession(info, {
+    starting: false,
+    conversationId: convoId,
+  });
   upsertSession(session);
   markSessionReady(session.id);
   activeSessionId.set(session.id);
@@ -686,21 +806,88 @@ export async function createSession(name?: string): Promise<SessionInfo> {
   return session;
 }
 
+/** New conversation + switch + one default shell session. */
+export async function createConversationWithSession(
+  name?: string,
+): Promise<{ conversation: Conversation; session: SessionInfo }> {
+  const conversation = createConversation(name);
+  const session = await createSession();
+  scheduleSaveAppState(200);
+  return { conversation, session };
+}
+
+/**
+ * Delete a conversation: kill its sessions (confirm if busy/TUI), drop chat
+ * for that convo, remove from the rail. If it was the last conversation,
+ * spawn a fresh one with a new session.
+ */
+export async function deleteConversation(conversationId: string): Promise<void> {
+  const list = get(conversations);
+  const convo = list.find((c) => c.id === conversationId);
+  if (!convo) {
+    throw new Error("Conversation not found");
+  }
+
+  const sess = sessionsInConversation(conversationId);
+  const blocking = sess.filter(
+    (s) => sessionIsTui(s) || s.activity === "busy" || getSessionTurn(s.id),
+  );
+  const wasLast = list.length <= 1;
+
+  if (sess.length > 0) {
+    const busyNote =
+      blocking.length > 0
+        ? `\n\n${blocking.length} session(s) still busy or in TUI will be killed.`
+        : "";
+    const lastNote = wasLast
+      ? `\n\nThis is the last conversation — a new empty one will be created.`
+      : "";
+    const ok = window.confirm(
+      `Delete conversation “${convo.name}” and remove ${sess.length} session(s)?${busyNote}${lastNote}\n\n` +
+        `Chat history for this conversation will be discarded. Host tmux sessions are killed.`,
+    );
+    if (!ok) return;
+  } else {
+    const lastNote = wasLast
+      ? `\n\nThis is the last conversation — a new empty one will be created.`
+      : "";
+    const ok = window.confirm(`Delete conversation “${convo.name}”?${lastNote}`);
+    if (!ok) return;
+  }
+
+  // Tear down PTYs first (order doesn't matter much).
+  for (const s of sess) {
+    try {
+      await invoke("close_session", { sessionId: s.id });
+    } catch (err) {
+      console.error("close_session during convo delete", s.id, err);
+    }
+    forgetSessionLocally(s.id);
+  }
+
+  removeConversationRecord(conversationId);
+
+  // Always keep at least one conversation with a usable shell.
+  if (get(conversations).length === 0) {
+    try {
+      await createConversationWithSession("Main");
+    } catch (err) {
+      console.error("recreate conversation after last delete failed", err);
+      pushToast("warn", "Deleted last conversation but failed to create a replacement.");
+    }
+  }
+
+  backendError.set(null);
+  scheduleSaveAppState(100);
+}
+
 /**
  * Kill and remove a session. Chat bubbles for that session stay in history.
- * Refuses to remove the last remaining session (creates none automatically).
+ * Empty conversations (zero sessions) are allowed — use + to add another.
  * Busy/TUI: confirm once, then kill (tmux kill-session destroys the work).
  */
 export async function closeSession(sessionId: string): Promise<void> {
-  const list = get(sessions);
-  if (list.length <= 1) {
-    pushToast(
-      "warn",
-      "Cannot remove the last session — add another first.",
-    );
-    return;
-  }
-  const session = list.find((s) => s.id === sessionId);
+  const session = get(sessions).find((s) => s.id === sessionId);
   if (!session) {
     throw new Error("Session not found");
   }
@@ -822,7 +1009,9 @@ export async function sendCommand(text: string): Promise<void> {
   // Other sessions stay fully usable in parallel.
 
   const sticky = get(stickySessionId) ?? get(activeSessionId);
-  const parsed = parseComposer(trimmed, get(sessions), sticky);
+  // Mentions resolve only within the active conversation.
+  const convoSessions = sessionsInConversation(get(activeConversationId));
+  const parsed = parseComposer(trimmed, convoSessions, sticky);
   if (parsed.targets.length === 0) return;
 
   if (parsed.stickyOnly) {
@@ -1042,7 +1231,8 @@ async function sendControlToSession(
  * without changing sticky permanently (unless you Enter to set sticky).
  */
 export function resolveControlTargets(composerText?: string | null): SessionInfo[] {
-  const list = get(sessions);
+  // Control targets (Ctrl+C etc.) stay within the active conversation.
+  const list = sessionsInConversation(get(activeConversationId));
   const sticky = get(stickySessionId) ?? get(activeSessionId);
 
   if (composerText != null && composerText.trim()) {

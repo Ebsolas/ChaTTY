@@ -5,6 +5,30 @@ export type ProcessStatus = "starting" | "running" | "exited";
 export type SessionActivity = "idle" | "busy" | "tui";
 export type TurnStatus = "running" | "ok" | "error" | "tui";
 
+/** Default conversation ids for first boot / v1 migration. */
+export const CONVO_MAIN_ID = "convo-main";
+export const CONVO_SCRATCH_ID = "convo-scratch";
+
+export type Conversation = {
+  id: string;
+  name: string;
+};
+
+/** Seeded on empty state; users can rename/delete/reorder freely after. */
+export const DEFAULT_CONVERSATIONS: Conversation[] = [
+  { id: CONVO_MAIN_ID, name: "Main" },
+  { id: CONVO_SCRATCH_ID, name: "Scratch" },
+];
+
+/** @deprecated use DEFAULT_CONVERSATIONS */
+export const STATIC_CONVERSATIONS = DEFAULT_CONVERSATIONS;
+
+/** Per-conversation UI focus restored on switch. */
+export type ConversationFocus = {
+  stickySessionId: string | null;
+  activeSessionId: string | null;
+};
+
 export interface SessionInfo {
   id: string;
   name: string;
@@ -12,6 +36,8 @@ export interface SessionInfo {
   cwd: string;
   shell: string;
   shellFlavor: string;
+  /** Conversation this session belongs to (UI grouping; PTY is global). */
+  conversationId: string;
   lineageId: string;
   parentSessionId: string | null;
   forkedFromMessageId: string | null;
@@ -42,6 +68,8 @@ export type StreamState = "open" | "closed";
 export interface ChatMessage {
   id: string;
   sessionId: string;
+  /** Conversation this message belongs to (filter on switch). */
+  conversationId: string;
   role: MessageRole;
   sessionName?: string;
   body: string;

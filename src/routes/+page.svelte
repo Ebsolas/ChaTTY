@@ -6,21 +6,29 @@
   import BusyIndicator from "$lib/components/BusyIndicator.svelte";
   import ChatView from "$lib/components/ChatView.svelte";
   import Composer from "$lib/components/Composer.svelte";
+  import ConversationsRail from "$lib/components/ConversationsRail.svelte";
   import SessionsRail from "$lib/components/SessionsRail.svelte";
   import SessionTerminal from "$lib/components/SessionTerminal.svelte";
   import ToastStack from "$lib/components/ToastStack.svelte";
   import { matchAction, type ActionId } from "$lib/keybindings";
   import {
+    activeConversationId,
+    activeMessages,
     activeSessionId,
+    activeSessions,
     activeTurn,
     activeTurns,
     backendError,
     chordFor,
     connected,
+    conversations,
     expandedSessionId,
     keybindings,
-    messages,
+    moveConversation,
+    renameConversation,
+    reorderConversation,
     sessions,
+    setActiveConversation,
     setKeybindings,
     stickySessionId,
   } from "$lib/stores";
@@ -28,7 +36,9 @@
     closeExpandedSession,
     closeSession,
     controlFromKeyboard,
+    createConversationWithSession,
     createSession,
+    deleteConversation,
     initSessionBridge,
     openExpandedSession,
     persistAppStateNow,
@@ -41,7 +51,9 @@
   let bootError = $state<string | null>(null);
   let booting = $state(true);
   let creatingSession = $state(false);
+  let creatingConversation = $state(false);
   let renameTargetId = $state<string | null>(null);
+  let renameConvoTargetId = $state<string | null>(null);
   /** Prevent re-entrant close handling while we confirm/save/destroy. */
   let closingApp = $state(false);
 
@@ -209,7 +221,10 @@
           return;
         }
         const id =
-          get(activeSessionId) ?? get(stickySessionId) ?? get(sessions)[0]?.id ?? null;
+          get(activeSessionId) ??
+          get(stickySessionId) ??
+          get(activeSessions)[0]?.id ??
+          null;
         if (id) openExpandedSession(id);
         return;
       }
@@ -226,7 +241,9 @@
       }
       case "renameSession": {
         const id =
-          get(activeSessionId) ?? get(stickySessionId) ?? get(sessions)[0]?.id;
+          get(activeSessionId) ??
+          get(stickySessionId) ??
+          get(activeSessions)[0]?.id;
         if (id) renameTargetId = id;
         return;
       }
@@ -252,7 +269,8 @@
       case "session8":
       case "session9": {
         const n = Number(action.replace("session", ""));
-        const target = get(sessions)[n - 1];
+        // Numbered sessions are relative to the active conversation.
+        const target = get(activeSessions)[n - 1];
         if (!target) return;
         activeSessionId.set(target.id);
         stickySessionId.set(target.id);
@@ -265,7 +283,7 @@
   }
 
   function cycleSession(delta: number) {
-    const list = get(sessions);
+    const list = get(activeSessions);
     if (list.length === 0) return;
     const cur =
       get(expandedSessionId) ?? get(activeSessionId) ?? get(stickySessionId);
@@ -315,6 +333,33 @@
     }
   }
 
+  async function handleCreateConversation() {
+    if (creatingConversation) return;
+    creatingConversation = true;
+    renameConvoTargetId = null;
+    backendError.set(null);
+    try {
+      await createConversationWithSession();
+    } catch (err) {
+      backendError.set(String(err));
+    } finally {
+      creatingConversation = false;
+    }
+  }
+
+  async function handleDeleteConversation(id: string) {
+    try {
+      if (renameConvoTargetId === id) renameConvoTargetId = null;
+      await deleteConversation(id);
+    } catch (err) {
+      backendError.set(String(err));
+    }
+  }
+
+  async function handleRenameConversation(id: string, name: string) {
+    renameConversation(id, name);
+  }
+
   async function handleCloseSession(id: string) {
     try {
       if (renameTargetId === id) renameTargetId = null;
@@ -337,8 +382,8 @@
 
   const activeSession = $derived(
     $activeSessionId
-      ? ($sessions.find((s) => s.id === $activeSessionId) ?? null)
-      : ($sessions[0] ?? null),
+      ? ($activeSessions.find((s) => s.id === $activeSessionId) ?? null)
+      : ($activeSessions[0] ?? null),
   );
 
   const expandedSession = $derived(
@@ -348,11 +393,11 @@
   );
 
   /**
-   * Bottom bar: long-running line commands only (builds, etc.).
-   * TUIs stay in the rail/session view — they are not expected to "finish" here.
+   * Bottom bar: long-running line commands only in the *active* conversation.
+   * Background convos finish via toast, not this bar.
    */
   const busySessions = $derived(
-    $sessions.filter((s) => {
+    $activeSessions.filter((s) => {
       if (s.activity === "tui" || s.tuiActive) return false;
       if (s.activity === "busy") return true;
       const turn = $activeTurns.get(s.id);
@@ -400,13 +445,38 @@
   </header>
 
   <main class="shell">
+    <ConversationsRail
+      conversations={$conversations}
+      activeId={$activeConversationId}
+      sessions={$sessions}
+      creating={creatingConversation}
+      renameTargetId={renameConvoTargetId}
+      onSelect={(id) => {
+        renameConvoTargetId = null;
+        setActiveConversation(id);
+      }}
+      onCreate={handleCreateConversation}
+      onDelete={handleDeleteConversation}
+      onRename={handleRenameConversation}
+      onBeginRename={(id) => {
+        renameConvoTargetId = id;
+      }}
+      onCancelRename={() => {
+        renameConvoTargetId = null;
+      }}
+      onReorder={(id, toIndex) => reorderConversation(id, toIndex)}
+      onMove={(id, delta) => moveConversation(id, delta)}
+    />
+
     <section class="chat-pane">
       <div class="pane-header">
         <span class="convo-name">
-          {#if $sessions.length > 1}
-            {$sessions.length} sessions
-          {:else}
-            {activeSession?.name ?? "local"}
+          {$conversations.find((c) => c.id === $activeConversationId)?.name ??
+            "Main"}
+          {#if $activeSessions.length > 1}
+            <span class="muted-count">· {$activeSessions.length} sessions</span>
+          {:else if activeSession}
+            <span class="muted-count">· @{activeSession.name}</span>
           {/if}
         </span>
         <span class="badge">mvp2</span>
@@ -428,7 +498,9 @@
       {/if}
 
       <div class="chat-body">
-        <ChatView messages={$messages} onOpenSession={handleOpenSession} />
+        {#key $activeConversationId}
+          <ChatView messages={$activeMessages} onOpenSession={handleOpenSession} />
+        {/key}
         <ToastStack />
       </div>
 
@@ -445,11 +517,12 @@
     </section>
 
     <SessionsRail
-      sessions={$sessions}
+      sessions={$activeSessions}
       activeId={$activeSessionId}
       expandedId={$expandedSessionId}
       creating={creatingSession}
       renameTargetId={renameTargetId}
+      canRemove={true}
       onOpen={handleOpenSession}
       onCreate={handleCreateSession}
       onClose={handleCloseSession}
@@ -462,7 +535,7 @@
       }}
     />
 
-    <!-- Overlay spans middle grid band (chat + rail), not composer -->
+    <!-- Overlay: middle row, chat + sessions columns only (not convos rail) -->
     {#if expandedSession}
       {#key expandedSession.id}
         <SessionTerminal sessionId={expandedSession.id} sessionName={expandedSession.name} />
@@ -478,12 +551,11 @@
 
 <style>
   /*
-   * Desktop shell: definite viewport height + named grid.
-   * Composer is the bottom row (not position:sticky). Rail is the right column.
+   * Desktop shell: 100vh + named grid.
    *
-   *   "top"      "top"
-   *   "chatTop"  "sessionRail"
-   *   "composer" "composer"
+   *   "top"    "top"      "top"
+   *   "convos" "chatTop"  "sessionRail"
+   *   "convos" "composer" "composer"
    */
   .app {
     position: fixed;
@@ -492,12 +564,12 @@
     height: 100vh;
     overflow: hidden;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 240px;
+    grid-template-columns: 200px minmax(0, 1fr) 240px;
     grid-template-rows: auto minmax(0, 1fr) auto;
     grid-template-areas:
-      "top      top"
-      "chatTop  sessionRail"
-      "composer composer";
+      "top      top      top"
+      "convos   chatTop  sessionRail"
+      "convos   composer composer";
     background: var(--bg, #0f1115);
     color: var(--text, #e8eaed);
   }
@@ -517,6 +589,14 @@
     display: contents;
   }
 
+  .shell > :global(aside.conversations-rail) {
+    grid-area: convos;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+    z-index: 2;
+  }
+
   .chat-pane {
     grid-area: chatTop;
     position: relative;
@@ -529,8 +609,7 @@
   }
 
   /* SessionsRail root is <aside class="sessions-rail"> */
-  .shell > :global(aside.sessions-rail),
-  .shell > :global(aside) {
+  .shell > :global(aside.sessions-rail) {
     grid-area: sessionRail;
     min-height: 0;
     min-width: 0;
@@ -538,10 +617,10 @@
     z-index: 2;
   }
 
-  /* Session terminal: middle row, both columns (chat + rail only) */
+  /* Session terminal: middle row, chat + sessions only (columns 2–3) */
   .shell > :global(.overlay) {
     grid-row: 2;
-    grid-column: 1 / -1;
+    grid-column: 2 / -1;
     z-index: 30;
     min-height: 0;
     min-width: 0;
@@ -614,6 +693,12 @@
   .convo-name {
     color: var(--text, #e8eaed);
     font-weight: 600;
+  }
+
+  .muted-count {
+    font-weight: 500;
+    color: var(--muted, #8b93a7);
+    font-size: 0.85em;
   }
 
   .badge {

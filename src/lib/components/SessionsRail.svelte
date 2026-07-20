@@ -270,7 +270,7 @@
                     />
                   </svg>
                 </button>
-                {#if canRemove && sessions.length > 1}
+                {#if canRemove}
                   <button
                     type="button"
                     class="icon-btn danger"
@@ -326,7 +326,7 @@
       <span>Rename</span>
       <kbd>{chordFor("renameSession")}</kbd>
     </button>
-    {#if canRemove && sessions.length > 1}
+    {#if canRemove}
       <button
         type="button"
         class="ctx-item danger"

@@ -29,7 +29,9 @@ const DEFAULT_ROWS: u16 = 40;
 const DEFAULT_COLS: u16 = 120;
 /// Batch PTY output for this long after the last byte, then flush even if
 /// no further data arrives (idle drain). Fixes "output stuck until next key".
-const EMIT_COALESCE: Duration = Duration::from_millis(16);
+/// Coalesce PTY emits (~30fps). Lower = snappier TUIs, higher = less IPC load
+/// when many sessions redraw (htop + shells).
+const EMIT_COALESCE: Duration = Duration::from_millis(32);
 /// Flush immediately under burst so UI stays responsive.
 const EMIT_HIGH_WATER: usize = 4096;
 
@@ -926,35 +928,53 @@ fn query_tmux_pane(tmux_name: &str, shell_path: &str) -> Option<TmuxPaneSnapshot
     })
 }
 
-/// Poll all tmux-backed sessions and emit activity events when state changes.
+/// Poll all tmux-backed sessions and emit activity events **only when state changes**.
 ///
-/// Idle is re-emitted periodically even when the command string is unchanged so
-/// the frontend can clear optimistic "busy" after fast commands (poll never
-/// observed a non-shell process).
-pub fn poll_tmux_activity(app: &AppHandle, mgr: &mut SessionManager) {
-    let targets: Vec<(String, String, String)> = mgr
-        .sessions
-        .values()
-        .filter(|s| s.backend == SessionBackend::Tmux)
-        .filter_map(|s| {
-            s.tmux_name
-                .as_ref()
-                .map(|n| (s.id.clone(), n.clone(), s.shell.clone()))
-        })
-        .collect();
-
-    for (session_id, tmux_name, shell) in targets {
-        // Once per session: strip green status bar (existing sessions predate conf).
-        let needs_status_off = mgr
+/// Important for performance: do not re-emit idle/tui every tick (htop + N shells
+/// used to flood the webview). Optimistic busy is cleared by the frontend quiet seal.
+///
+/// External `tmux` / `/proc` work runs **outside** the session mutex so inject/resize
+/// are not blocked for tens of ms per poll cycle.
+pub fn poll_tmux_activity(app: &AppHandle, mgr: &std::sync::Mutex<SessionManager>) {
+    // 1) Snapshot targets under a short lock.
+    let targets: Vec<(String, String, String, bool, Option<String>, Option<String>)> = {
+        let Ok(guard) = mgr.lock() else {
+            return;
+        };
+        guard
             .sessions
-            .get(&session_id)
-            .map(|s| !s.tmux_status_off)
-            .unwrap_or(true);
-        if needs_status_off {
+            .values()
+            .filter(|s| s.backend == SessionBackend::Tmux)
+            .filter_map(|s| {
+                s.tmux_name.as_ref().map(|n| {
+                    (
+                        s.id.clone(),
+                        n.clone(),
+                        s.shell.clone(),
+                        s.tmux_status_off,
+                        s.last_poll_cmd.clone(),
+                        s.last_poll_path.clone(),
+                    )
+                })
+            })
+            .collect()
+    };
+
+    // 2) Slow I/O without holding the mutex.
+    struct PendingEmit {
+        session_id: String,
+        activity: PaneActivity,
+        command: String,
+        path: String,
+        mark_status_off: bool,
+    }
+    let mut pending: Vec<PendingEmit> = Vec::new();
+
+    for (session_id, tmux_name, shell, status_off, prev_cmd, prev_path) in targets {
+        let mut mark_status_off = false;
+        if !status_off {
             ensure_tmux_status_off(&tmux_name);
-            if let Some(live) = mgr.sessions.get_mut(&session_id) {
-                live.tmux_status_off = true;
-            }
+            mark_status_off = true;
         }
 
         let Some(snap) = query_tmux_pane(&tmux_name, &shell) else {
@@ -964,57 +984,58 @@ pub fn poll_tmux_activity(app: &AppHandle, mgr: &mut SessionManager) {
             continue;
         }
         let activity = classify_pane_command(&snap.command, &shell);
-        let prev_cmd = mgr
-            .sessions
-            .get(&session_id)
-            .and_then(|s| s.last_poll_cmd.clone());
-        let prev_path = mgr
-            .sessions
-            .get(&session_id)
-            .and_then(|s| s.last_poll_path.clone());
         let cmd_changed = prev_cmd.as_ref().map(|c| c != &snap.command).unwrap_or(true);
         let path_changed = prev_path.as_ref().map(|p| p != &snap.path).unwrap_or(true);
-
         let prev_activity = prev_cmd
             .as_ref()
             .map(|c| classify_pane_command(c, &shell));
         let activity_changed = prev_activity.map(|a| a != activity).unwrap_or(true);
 
-        // Always re-emit Idle (and Tui) so UI can recover from optimistic busy.
-        // Busy only needs emit on change (otherwise spam while builds run).
-        let should_emit = cmd_changed
-            || path_changed
-            || activity_changed
-            || activity == PaneActivity::Idle
-            || activity == PaneActivity::Tui;
-
-        if !should_emit {
+        if !cmd_changed && !path_changed && !activity_changed && !mark_status_off {
             continue;
         }
 
-        if let Some(live) = mgr.sessions.get_mut(&session_id) {
-            live.last_poll_cmd = Some(snap.command.clone());
-            if !snap.path.is_empty() {
-                live.last_poll_path = Some(snap.path.clone());
-                let p = PathBuf::from(&snap.path);
-                if p.is_dir() {
-                    live.cwd = p;
+        pending.push(PendingEmit {
+            session_id,
+            activity,
+            command: snap.command,
+            path: snap.path,
+            mark_status_off,
+        });
+    }
+
+    if pending.is_empty() {
+        return;
+    }
+
+    // 3) Apply + emit under lock (brief).
+    let Ok(mut guard) = mgr.lock() else {
+        return;
+    };
+    for p in pending {
+        let cwd = if let Some(live) = guard.sessions.get_mut(&p.session_id) {
+            if p.mark_status_off {
+                live.tmux_status_off = true;
+            }
+            live.last_poll_cmd = Some(p.command.clone());
+            if !p.path.is_empty() {
+                live.last_poll_path = Some(p.path.clone());
+                let path_buf = PathBuf::from(&p.path);
+                if path_buf.is_dir() {
+                    live.cwd = path_buf;
                 }
             }
-        }
-
-        let cwd = mgr
-            .sessions
-            .get(&session_id)
-            .map(|s| s.cwd.to_string_lossy().into_owned())
-            .unwrap_or_default();
+            live.cwd.to_string_lossy().into_owned()
+        } else {
+            continue;
+        };
 
         let _ = app.emit(
             "session-activity",
             SessionActivityEvent {
-                session_id,
-                activity,
-                command: snap.command,
+                session_id: p.session_id,
+                activity: p.activity,
+                command: p.command,
                 cwd,
             },
         );
@@ -1027,15 +1048,13 @@ pub fn start_activity_poller(app: AppHandle) {
         .name("chatty-tmux-poll".into())
         .spawn(move || {
             loop {
-                thread::sleep(Duration::from_millis(350));
+                thread::sleep(Duration::from_millis(400));
                 let state = app.try_state::<AppState>();
                 let Some(state) = state else {
                     continue;
                 };
-                let Ok(mut mgr) = state.sessions.lock() else {
-                    continue;
-                };
-                poll_tmux_activity(&app, &mut mgr);
+                // Pass mutex ref — poll releases lock during tmux I/O.
+                poll_tmux_activity(&app, &state.sessions);
             }
         })
         .ok();

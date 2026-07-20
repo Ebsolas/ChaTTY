@@ -4,7 +4,7 @@
     pushComposerHistory,
   } from "$lib/composerHistory";
   import { mentionSuggestions } from "$lib/mentions";
-  import { chordFor, sessions, stickySessionId } from "$lib/stores";
+  import { activeSessions, chordFor, stickySessionId } from "$lib/stores";
 
   interface Props {
     disabled?: boolean;
@@ -32,11 +32,11 @@
 
   const suggestions = $derived(
     mentionQuery !== null
-      ? mentionSuggestions(mentionQuery, $sessions)
+      ? mentionSuggestions(mentionQuery, $activeSessions)
       : [],
   );
 
-  const sticky = $derived($sessions.find((s) => s.id === $stickySessionId));
+  const sticky = $derived($activeSessions.find((s) => s.id === $stickySessionId));
   const stickyName = $derived(sticky?.name ?? "local");
   const stickyIsTui = $derived(
     sticky?.activity === "tui" || !!sticky?.tuiActive,

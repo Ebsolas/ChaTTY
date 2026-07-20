@@ -10,9 +10,15 @@ import {
 import type {
   BackendSessionInfo,
   ChatMessage,
+  Conversation,
+  ConversationFocus,
   SessionActivity,
   SessionInfo,
   TurnStatus,
+} from "./types";
+import {
+  CONVO_MAIN_ID,
+  DEFAULT_CONVERSATIONS,
 } from "./types";
 
 export const sessions = writable<SessionInfo[]>([]);
@@ -22,6 +28,179 @@ export const stickySessionId = writable<string | null>(null);
 export const backendError = writable<string | null>(null);
 export const connected = writable(false);
 export const expandedSessionId = writable<string | null>(null);
+
+/** Ordered conversation list (create / rename / delete / reorder). */
+export const conversations = writable<Conversation[]>([...DEFAULT_CONVERSATIONS]);
+export const activeConversationId = writable<string>(CONVO_MAIN_ID);
+/** Focus snapshot per conversation for unload/restore on switch. */
+export const conversationFocus = writable<Record<string, ConversationFocus>>({});
+
+export const activeSessions = derived(
+  [sessions, activeConversationId],
+  ([$sessions, $convoId]) => $sessions.filter((s) => s.conversationId === $convoId),
+);
+
+export const activeMessages = derived(
+  [messages, activeConversationId],
+  ([$messages, $convoId]) => $messages.filter((m) => m.conversationId === $convoId),
+);
+
+export function sessionsInConversation(conversationId: string): SessionInfo[] {
+  return get(sessions).filter((s) => s.conversationId === conversationId);
+}
+
+function snapshotFocus(convoId: string) {
+  conversationFocus.update((map) => ({
+    ...map,
+    [convoId]: {
+      stickySessionId: get(stickySessionId),
+      activeSessionId: get(activeSessionId),
+    },
+  }));
+}
+
+/**
+ * Unload previous conversation UI focus and restore the target.
+ * PTYs keep running; only sticky/active/expanded selection changes.
+ */
+export function setActiveConversation(conversationId: string) {
+  const list = get(conversations);
+  if (!list.some((c) => c.id === conversationId)) return;
+  const prev = get(activeConversationId);
+  if (prev === conversationId) return;
+
+  if (prev && list.some((c) => c.id === prev)) snapshotFocus(prev);
+
+  const exp = get(expandedSessionId);
+  if (exp) {
+    const sess = get(sessions).find((s) => s.id === exp);
+    if (!sess || sess.conversationId !== conversationId) {
+      expandedSessionId.set(null);
+    }
+  }
+
+  activeConversationId.set(conversationId);
+
+  const focus = get(conversationFocus)[conversationId];
+  const inConvo = sessionsInConversation(conversationId);
+  const ids = new Set(inConvo.map((s) => s.id));
+  const sticky =
+    (focus?.stickySessionId && ids.has(focus.stickySessionId)
+      ? focus.stickySessionId
+      : null) ??
+    inConvo[0]?.id ??
+    null;
+  const active =
+    (focus?.activeSessionId && ids.has(focus.activeSessionId)
+      ? focus.activeSessionId
+      : null) ?? sticky;
+  stickySessionId.set(sticky);
+  activeSessionId.set(active);
+}
+
+function uniqueConversationName(base: string, excludeId?: string): string {
+  const cleaned = base.trim() || "Conversation";
+  const names = new Set(
+    get(conversations)
+      .filter((c) => c.id !== excludeId)
+      .map((c) => c.name.toLowerCase()),
+  );
+  if (!names.has(cleaned.toLowerCase())) return cleaned;
+  for (let n = 2; n < 1000; n++) {
+    const candidate = `${cleaned} ${n}`;
+    if (!names.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${cleaned} ${crypto.randomUUID().slice(0, 6)}`;
+}
+
+/** Create a conversation and switch to it (no session yet — caller may spawn one). */
+export function createConversation(name?: string): Conversation {
+  const id = `convo-${crypto.randomUUID()}`;
+  const convo: Conversation = {
+    id,
+    name: uniqueConversationName(name?.trim() || "Conversation"),
+  };
+  conversations.update((list) => [...list, convo]);
+  conversationFocus.update((map) => ({
+    ...map,
+    [id]: { stickySessionId: null, activeSessionId: null },
+  }));
+  setActiveConversation(id);
+  return convo;
+}
+
+export function renameConversation(conversationId: string, name: string): Conversation {
+  const next = name.trim();
+  if (!next) throw new Error("Name cannot be empty");
+  const list = get(conversations);
+  const cur = list.find((c) => c.id === conversationId);
+  if (!cur) throw new Error("Conversation not found");
+  if (next.toLowerCase() === cur.name.toLowerCase()) return cur;
+
+  const taken = list.some(
+    (c) => c.id !== conversationId && c.name.toLowerCase() === next.toLowerCase(),
+  );
+  if (taken) throw new Error(`Name already used: ${next}`);
+
+  const updated = { ...cur, name: next };
+  conversations.update((all) =>
+    all.map((c) => (c.id === conversationId ? updated : c)),
+  );
+  return updated;
+}
+
+/**
+ * Remove a conversation from the list (sessions/messages must already be cleaned up).
+ * Switches to another convo if available; leaves zero conversations if it was the last
+ * (caller should seed a replacement).
+ */
+export function removeConversationRecord(conversationId: string): void {
+  const list = get(conversations);
+  if (!list.some((c) => c.id === conversationId)) {
+    throw new Error("Conversation not found");
+  }
+
+  const fallback = list.find((c) => c.id !== conversationId) ?? null;
+  if (get(activeConversationId) === conversationId) {
+    if (fallback) {
+      setActiveConversation(fallback.id);
+    } else {
+      expandedSessionId.set(null);
+      stickySessionId.set(null);
+      activeSessionId.set(null);
+      activeConversationId.set("");
+    }
+  }
+
+  conversations.update((all) => all.filter((c) => c.id !== conversationId));
+  conversationFocus.update((map) => {
+    const next = { ...map };
+    delete next[conversationId];
+    return next;
+  });
+  messages.update((all) => all.filter((m) => m.conversationId !== conversationId));
+}
+
+/** Reorder by moving `conversationId` to `toIndex` (0-based). */
+export function reorderConversation(conversationId: string, toIndex: number): void {
+  const list = get(conversations);
+  const from = list.findIndex((c) => c.id === conversationId);
+  if (from < 0) return;
+  const clamped = Math.max(0, Math.min(list.length - 1, toIndex));
+  if (from === clamped) return;
+  const next = [...list];
+  const [item] = next.splice(from, 1);
+  next.splice(clamped, 0, item!);
+  conversations.set(next);
+}
+
+/** Move conversation up (-1) or down (+1) in the rail. */
+export function moveConversation(conversationId: string, delta: -1 | 1): void {
+  const list = get(conversations);
+  const from = list.findIndex((c) => c.id === conversationId);
+  if (from < 0) return;
+  reorderConversation(conversationId, from + delta);
+}
 
 /** Soft notices (warnings/info) — bottom-right balloon, not the red error strip. */
 export type ToastLevel = "info" | "warn";
@@ -149,9 +328,11 @@ export function isSessionTui(sessionId: string): boolean {
 
 export function backendToSession(
   info: BackendSessionInfo,
-  opts?: { starting?: boolean },
+  opts?: { starting?: boolean; conversationId?: string },
 ): SessionInfo {
   const starting = opts?.starting === true;
+  const conversationId =
+    opts?.conversationId || get(activeConversationId) || CONVO_MAIN_ID;
   return {
     id: info.id,
     name: info.name,
@@ -159,6 +340,7 @@ export function backendToSession(
     cwd: info.cwd ?? "",
     shell: info.shell ?? "",
     shellFlavor: info.shellFlavor ?? "",
+    conversationId,
     lineageId: info.id,
     parentSessionId: null,
     forkedFromMessageId: null,
@@ -174,13 +356,16 @@ export function upsertSession(info: SessionInfo) {
     const idx = list.findIndex((s) => s.id === info.id);
     if (idx === -1) return [...list, info];
     const next = [...list];
+    const prev = next[idx]!;
     // Preserve activity/tui flags when a later backend snapshot is thinner.
+    // Keep conversationId unless the incoming value is explicitly set & different seed.
     next[idx] = {
-      ...next[idx],
+      ...prev,
       ...info,
-      activity: info.activity ?? next[idx]!.activity,
-      tuiActive: info.tuiActive ?? next[idx]!.tuiActive,
-      starting: info.starting ?? next[idx]!.starting,
+      conversationId: info.conversationId || prev.conversationId,
+      activity: info.activity ?? prev.activity,
+      tuiActive: info.tuiActive ?? prev.tuiActive,
+      starting: info.starting ?? prev.starting,
     };
     return next;
   });
@@ -210,6 +395,8 @@ export function applySessionRename(sessionId: string, name: string) {
 
 /** Remove a session from the rail (chat history for that id is kept). */
 export function removeSession(sessionId: string) {
+  const removed = get(sessions).find((s) => s.id === sessionId);
+  const convoId = removed?.conversationId;
   sessions.update((list) => list.filter((s) => s.id !== sessionId));
   altScreenSessions.update((set) => {
     if (!set.has(sessionId)) return set;
@@ -218,13 +405,16 @@ export function removeSession(sessionId: string) {
     return next;
   });
   setSessionTurn(sessionId, null);
+  const remaining = get(sessions);
+  const prefer =
+    (convoId ? remaining.filter((s) => s.conversationId === convoId) : remaining)[0]
+      ?? remaining[0]
+      ?? null;
   if (get(activeSessionId) === sessionId) {
-    const remaining = get(sessions);
-    activeSessionId.set(remaining[0]?.id ?? null);
+    activeSessionId.set(prefer?.id ?? null);
   }
   if (get(stickySessionId) === sessionId) {
-    const remaining = get(sessions);
-    stickySessionId.set(remaining[0]?.id ?? null);
+    stickySessionId.set(prefer?.id ?? null);
   }
   if (get(expandedSessionId) === sessionId) {
     expandedSessionId.set(null);
@@ -265,50 +455,56 @@ export function applySessionActivityPoll(
   command: string,
   cwd?: string,
 ) {
-  let activityChanged = false;
-  sessions.update((list) => {
-    let changed = false;
-    const next = list.map((s) => {
-      if (s.id !== sessionId) return s;
-      const nextCmd =
-        activity === "idle" ? s.lastCommand : command || s.lastCommand;
-      const nextCwd = cwd && cwd.length > 0 ? cwd : s.cwd;
-      const nextTui = activity === "tui";
-      if (
-        s.activity === activity &&
-        s.tuiActive === nextTui &&
-        s.lastCommand === nextCmd &&
-        s.cwd === nextCwd
-      ) {
-        return s;
-      }
-      changed = true;
-      if (s.activity !== activity) activityChanged = true;
-      return {
-        ...s,
-        activity,
-        tuiActive: nextTui,
-        lastCommand: nextCmd,
-        cwd: nextCwd,
-      };
-    });
-    return changed ? next : list;
-  });
+  // Svelte notifies subscribers on every `update()` even if the array ref is
+  // unchanged (objects always "not equal"). Skip the store write entirely
+  // when nothing changed — critical with multi-session + htop redraws.
+  const list = get(sessions);
+  const cur = list.find((s) => s.id === sessionId);
+  if (!cur) return;
+
+  const nextCmd =
+    activity === "idle" ? cur.lastCommand : command || cur.lastCommand;
+  const nextCwd = cwd && cwd.length > 0 ? cwd : cur.cwd;
+  const nextTui = activity === "tui";
+  const same =
+    cur.activity === activity &&
+    cur.tuiActive === nextTui &&
+    cur.lastCommand === nextCmd &&
+    cur.cwd === nextCwd;
+
+  if (!same) {
+    sessions.update((all) =>
+      all.map((s) =>
+        s.id === sessionId
+          ? {
+              ...s,
+              activity,
+              tuiActive: nextTui,
+              lastCommand: nextCmd,
+              cwd: nextCwd,
+            }
+          : s,
+      ),
+    );
+  }
+
   // Only touch alt-screen set when TUI membership might change.
   if (activity === "tui") {
-    altScreenSessions.update((set) => {
-      if (set.has(sessionId)) return set;
-      const next = new Set(set);
-      next.add(sessionId);
-      return next;
-    });
-  } else if (activityChanged || activity === "idle" || activity === "busy") {
-    altScreenSessions.update((set) => {
-      if (!set.has(sessionId)) return set;
-      const next = new Set(set);
-      next.delete(sessionId);
-      return next;
-    });
+    if (!get(altScreenSessions).has(sessionId)) {
+      altScreenSessions.update((set) => {
+        const next = new Set(set);
+        next.add(sessionId);
+        return next;
+      });
+    }
+  } else if (cur.activity === "tui" || get(altScreenSessions).has(sessionId)) {
+    if (get(altScreenSessions).has(sessionId)) {
+      altScreenSessions.update((set) => {
+        const next = new Set(set);
+        next.delete(sessionId);
+        return next;
+      });
+    }
   }
 }
 
@@ -337,6 +533,14 @@ export function setSessionTui(sessionId: string, tuiActive: boolean) {
   );
 }
 
+function conversationIdForSession(sessionId: string): string {
+  return (
+    get(sessions).find((s) => s.id === sessionId)?.conversationId ??
+    get(activeConversationId) ??
+    CONVO_MAIN_ID
+  );
+}
+
 export function appendUserMessage(
   body: string,
   sessionId: string,
@@ -346,6 +550,7 @@ export function appendUserMessage(
   const msg: ChatMessage = {
     id: crypto.randomUUID(),
     sessionId,
+    conversationId: conversationIdForSession(sessionId),
     role: "user",
     sessionName,
     body,
@@ -366,6 +571,7 @@ export function openSessionBubble(
   const msg: ChatMessage = {
     id: crypto.randomUUID(),
     sessionId,
+    conversationId: conversationIdForSession(sessionId),
     role: "session",
     sessionName,
     body: "",
@@ -448,6 +654,12 @@ function isPromptishLine(line: string): boolean {
   return false;
 }
 
+function shortCommand(cmd: string, max = 48): string {
+  const t = cmd.trim().replace(/\s+/g, " ");
+  if (t.length <= max) return t;
+  return `${t.slice(0, max - 1)}…`;
+}
+
 /** Seal the open turn for a specific session (other sessions keep running). */
 export function sealTurn(sessionId: string, status: TurnStatus = "ok") {
   const turn = getSessionTurn(sessionId);
@@ -472,6 +684,21 @@ export function sealTurn(sessionId: string, status: TurnStatus = "ok") {
   } else {
     setSessionActivity(sessionId, "idle");
   }
+
+  // Background conversation: balloon when work finishes while you're elsewhere.
+  const sess = get(sessions).find((s) => s.id === sessionId);
+  const activeConvo = get(activeConversationId);
+  if (sess && sess.conversationId !== activeConvo) {
+    const convoName =
+      get(conversations).find((c) => c.id === sess.conversationId)?.name ??
+      "another conversation";
+    const cmd = turn.command ? ` · ${shortCommand(turn.command)}` : "";
+    pushToast(
+      finalStatus === "error" ? "warn" : "info",
+      `@${sess.name} finished in ${convoName}${cmd}`,
+    );
+  }
+
   setSessionTurn(sessionId, null);
 }
 

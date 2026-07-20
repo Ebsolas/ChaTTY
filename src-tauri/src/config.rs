@@ -159,10 +159,15 @@ pub struct SavedSession {
     pub cwd: String,
     #[serde(default)]
     pub shell: String,
+    /// Conversation membership (frontend-owned; optional for v1 state files).
+    #[serde(default)]
+    pub conversation_id: Option<String>,
 }
 
-/// Opaque chat message blob (frontend-owned shape).
+/// Opaque conversation / focus / message blobs (frontend-owned shapes).
 pub type SavedMessage = serde_json::Value;
+pub type SavedConversation = serde_json::Value;
+pub type SavedConversationFocus = serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -178,23 +183,32 @@ pub struct AppStateFile {
     #[serde(default)]
     pub expanded_session_id: Option<String>,
     #[serde(default)]
+    pub active_conversation_id: Option<String>,
+    #[serde(default)]
+    pub conversations: Vec<SavedConversation>,
+    #[serde(default)]
+    pub conversation_focus: Option<SavedConversationFocus>,
+    #[serde(default)]
     pub sessions: Vec<SavedSession>,
     #[serde(default)]
     pub messages: Vec<SavedMessage>,
 }
 
 fn default_state_version() -> u32 {
-    1
+    2
 }
 
 impl Default for AppStateFile {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             saved_at: 0,
             sticky_session_id: None,
             active_session_id: None,
             expanded_session_id: None,
+            active_conversation_id: None,
+            conversations: Vec::new(),
+            conversation_focus: None,
             sessions: Vec::new(),
             messages: Vec::new(),
         }
@@ -240,7 +254,10 @@ pub fn save_app_state(mut state: AppStateFile) -> Result<String, String> {
             .messages
             .split_off(state.messages.len() - MAX_MESSAGES);
     }
-    state.version = 1;
+    // Frontend owns schema evolution; accept whatever version it sends.
+    if state.version < 2 {
+        state.version = 2;
+    }
     state.saved_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

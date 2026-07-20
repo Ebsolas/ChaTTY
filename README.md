@@ -75,9 +75,23 @@ npm run tauri dev
 
 Composer **↑ / ↓** recalls command history (persisted in localStorage). Each session has its own chat capture, so a TUI or long job on `@local` does not block `@local-2`.
 
+### Conversations
+
+Left rail lists **conversations** (default **Main** + **Scratch**). Each has its own chat history and sessions.
+
+| Action | How |
+|--------|-----|
+| Switch | Click a row (UI unloads/restores; PTYs keep running) |
+| New | `+` in the Conversations header (also spawns a session) |
+| Rename | Double-click, or context menu → Rename |
+| Reorder | Drag rows, or context menu → Move up/down |
+| Delete | Context menu → Delete… (kills that convo’s sessions; confirms if busy/TUI). Deleting the **last** conversation auto-creates a fresh **Main** with a new session. |
+
+Sessions may all be closed (empty conversation); use **+** on the sessions rail to add one. Background work in another conversation still finishes with a toast balloon.
+
 ### Persistence
 
-On quit/restart Chatty restores session **names, order, cwd, sticky target, and chat history** from:
+On quit/restart Chatty restores **conversations**, session **names, order, cwd, sticky target, and chat history** from:
 
 ```text
 ~/.config/chatty/state.json
