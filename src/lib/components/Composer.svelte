@@ -23,10 +23,12 @@
   /** Snapshot of the input when history browse starts. */
   let historyDraft = $state("");
 
-  /** Text after the @ being completed, if any. */
+  /** Text after the @ being completed, if any. null = menu closed. */
   let mentionQuery = $state<string | null>(null);
   let mentionStart = $state(-1);
   let selectedIdx = $state(0);
+  /** Escape closed the menu; stay closed until the user types or leaves the @ region. */
+  let mentionDismissed = $state(false);
 
   const suggestions = $derived(
     mentionQuery !== null
@@ -40,36 +42,49 @@
     sticky?.activity === "tui" || !!sticky?.tuiActive,
   );
 
-  function updateMentionState() {
+  /** Detect in-progress @mention at the caret (does not open/close the menu). */
+  function mentionContextAtCaret(): { start: number; partial: string } | null {
     const el = inputEl;
-    if (!el) {
-      mentionQuery = null;
-      return;
-    }
+    if (!el) return null;
     const pos = el.selectionStart ?? value.length;
     const before = value.slice(0, pos);
     const at = before.lastIndexOf("@");
-    if (at < 0) {
-      mentionQuery = null;
-      mentionStart = -1;
-      return;
-    }
+    if (at < 0) return null;
     // @ must be start or after whitespace
-    if (at > 0 && !/\s/.test(before[at - 1]!)) {
-      mentionQuery = null;
-      mentionStart = -1;
-      return;
-    }
+    if (at > 0 && !/\s/.test(before[at - 1]!)) return null;
     const partial = before.slice(at + 1);
-    // Stop mention mode if space after name (already completed)
-    if (/\s/.test(partial)) {
+    // Completed mention if space after name
+    if (/\s/.test(partial)) return null;
+    return { start: at, partial };
+  }
+
+  function updateMentionState() {
+    const ctx = mentionContextAtCaret();
+    if (!ctx) {
       mentionQuery = null;
       mentionStart = -1;
+      mentionDismissed = false;
       return;
     }
-    mentionQuery = partial;
-    mentionStart = at;
-    selectedIdx = 0;
+
+    // User hit Escape — keep closed while caret stays in this @ region.
+    if (mentionDismissed) {
+      mentionQuery = null;
+      mentionStart = ctx.start;
+      return;
+    }
+
+    // Only reset highlight when the filter text changes (not on ↑/↓).
+    if (mentionQuery !== ctx.partial || mentionStart !== ctx.start) {
+      selectedIdx = 0;
+    }
+    mentionQuery = ctx.partial;
+    mentionStart = ctx.start;
+  }
+
+  function dismissMentionMenu() {
+    mentionQuery = null;
+    mentionDismissed = true;
   }
 
   function applyMention(name: string) {
@@ -81,6 +96,7 @@
     value = `${before}@${name} ${after}`;
     mentionQuery = null;
     mentionStart = -1;
+    mentionDismissed = false;
     // Editing live value — leave history browse mode.
     historyIndex = -1;
     requestAnimationFrame(() => {
@@ -142,32 +158,46 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (mentionQuery !== null && suggestions.length > 0) {
+    const menuOpen = mentionQuery !== null && suggestions.length > 0;
+
+    if (menuOpen) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
+        e.stopPropagation();
         selectedIdx = (selectedIdx + 1) % suggestions.length;
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
+        e.stopPropagation();
         selectedIdx = (selectedIdx - 1 + suggestions.length) % suggestions.length;
         return;
       }
       if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
         e.preventDefault();
+        e.stopPropagation();
         const pick = suggestions[selectedIdx];
         if (pick) applyMention(pick.name);
         return;
       }
       if (e.key === "Escape") {
         e.preventDefault();
-        mentionQuery = null;
+        e.stopPropagation();
+        dismissMentionMenu();
         return;
       }
     }
 
-    // Command history (when not picking @mentions)
-    if (mentionQuery === null) {
+    // Esc while dismissed but still in @… shouldn't reopen via later handlers
+    if (e.key === "Escape" && mentionDismissed && mentionContextAtCaret()) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
+    // Command history — not while the mention menu is open, and not while
+    // dismissed-but-still-in-@ (↑ would wipe the draft with history).
+    if (!menuOpen && !(mentionDismissed && mentionContextAtCaret())) {
       if (e.key === "ArrowUp") {
         e.preventDefault();
         historyUp();
@@ -186,8 +216,24 @@
     }
   }
 
+  function onKeyup(e: KeyboardEvent) {
+    // Don't re-sync on keys that navigate/dismiss the menu — that used to
+    // reset selectedIdx to 0 and reopen after Escape.
+    if (
+      e.key === "ArrowUp" ||
+      e.key === "ArrowDown" ||
+      e.key === "Escape" ||
+      e.key === "Enter" ||
+      e.key === "Tab"
+    ) {
+      return;
+    }
+    updateMentionState();
+  }
+
   function onInput() {
-    // Typing abandons history browse (draft is the live value).
+    // Typing re-enables the menu and abandons history browse.
+    mentionDismissed = false;
     if (historyIndex !== -1) {
       historyIndex = -1;
       historyDraft = "";
@@ -248,7 +294,7 @@
       onkeydown={onKeydown}
       oninput={onInput}
       onclick={updateMentionState}
-      onkeyup={updateMentionState}
+      onkeyup={onKeyup}
       autocomplete="off"
       spellcheck="false"
     />
