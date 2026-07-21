@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Chatty ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'rc') }}
+          generate_release_notes: true
+          body: |
+            ## Chatty ${{ github.ref_name }}
+
+            Conversational terminal — Discord-style chat over local shell sessions (Tauri 2 + SvelteKit).
+
+            ### Highlights
+            - Multi-session chat + full session terminal views
+            - Groups, conversations, and sessions rails (CRUD, reorder, resize)
+            - **chatty-host** durable PTY backend on Unix (reattach-friendly)
+            - Keyboard focus regions, jump palette (`Alt+P`), resizable rails
+            - Busy / TUI activity indicators and composer `@session` targeting
+
+            ### Develop
+            ```bash
+            npm install
+            npm run tauri dev
+            ```
+
+            ### Build
+            ```bash
+            npm run tauri build
+            ```
+
+            Source-only pre-release for now (no multi-platform installer assets yet). See the README for keybindings and session engine notes (`CHATTY_SESSION_ENGINE`).

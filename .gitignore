@@ -20,3 +20,6 @@ target/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Local tooling (portable gh, etc.)
+.tools/
