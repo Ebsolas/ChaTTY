@@ -26,8 +26,8 @@ First public pre-release of **Chatty** — a conversational terminal with Discor
 
 ## Install from source
 ```bash
-git clone https://github.com/Ebsolas/Chatty.git
-cd Chatty
+git clone https://github.com/Ebsolas/ChaTTY.git
+cd ChaTTY
 git checkout v0.1.0-beta.1
 npm install
 npm run tauri dev
