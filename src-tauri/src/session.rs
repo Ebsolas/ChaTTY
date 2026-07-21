@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use std::os::fd::RawFd;
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
@@ -45,7 +45,9 @@ pub enum SessionStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionBackend {
-    /// Outer PTY runs `tmux new-session -A` (durable on Chatty host).
+    /// Durable PTYs owned by the chatty-host process (reattach, no tmux).
+    Host,
+    /// Outer PTY runs `tmux new-session -A` (legacy Linux).
     Tmux,
     /// Outer PTY runs the shell directly (no reattach after quit).
     Plain,
@@ -54,6 +56,7 @@ pub enum SessionBackend {
 impl SessionBackend {
     pub fn as_str(self) -> &'static str {
         match self {
+            SessionBackend::Host => "host",
             SessionBackend::Tmux => "tmux",
             SessionBackend::Plain => "plain",
         }
@@ -69,11 +72,11 @@ pub struct SessionInfo {
     pub cwd: String,
     pub shell: String,
     pub shell_flavor: String,
-    /// How this session is hosted: "tmux" | "plain".
+    /// How this session is hosted: "host" | "tmux" | "plain".
     pub backend: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionOutputEvent {
     pub session_id: String,
@@ -327,10 +330,10 @@ impl SessionManager {
             .filter(|p| p.is_dir())
             .unwrap_or_else(shell::default_cwd);
 
-        let (backend, tmux_name) = if tmux_available() {
-            (SessionBackend::Tmux, Some(tmux_session_name(&id)))
-        } else {
-            (SessionBackend::Plain, None)
+        let (backend, tmux_name) = match host_session_backend() {
+            SessionBackend::Host => (SessionBackend::Host, None),
+            SessionBackend::Tmux => (SessionBackend::Tmux, Some(tmux_session_name(&id))),
+            SessionBackend::Plain => (SessionBackend::Plain, None),
         };
 
         let live = LiveSession {
@@ -381,6 +384,25 @@ impl SessionManager {
         Ok(session_info(live))
     }
 
+    /// Mark a session as ready when PTY is owned by chatty-host (no local InteractivePty).
+    pub fn finish_create_host(&mut self, session_id: &str) -> Result<SessionInfo, String> {
+        let live = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| format!("unknown session: {session_id}"))?;
+        live.backend = SessionBackend::Host;
+        live.pty = None;
+        live.tmux_name = None;
+        Ok(session_info(live))
+    }
+
+    pub fn backend_of(&self, session_id: &str) -> Result<SessionBackend, String> {
+        self.sessions
+            .get(session_id)
+            .map(|s| s.backend)
+            .ok_or_else(|| format!("unknown session: {session_id}"))
+    }
+
     /// Roll back a failed spawn (slot reserved but PTY never attached).
     pub fn abort_create(&mut self, app: &AppHandle, session_id: &str) {
         if self.sessions.remove(session_id).is_none() {
@@ -395,8 +417,10 @@ impl SessionManager {
         );
     }
 
-    /// Destroy a session: kill durable tmux session (if any) + outer PTY client.
+    /// Destroy a session: kill durable backend (tmux/host) + outer PTY client.
     /// App quit should NOT call this for every session — only detach the client.
+    ///
+    /// When `backend == Host`, caller must destroy the host-side session first.
     pub fn close(&mut self, app: &AppHandle, session_id: &str) -> Result<(), String> {
         let mut live = self
             .sessions
@@ -404,8 +428,7 @@ impl SessionManager {
             .ok_or_else(|| format!("unknown session: {session_id}"))?;
         self.order.retain(|id| id != session_id);
 
-        // Explicit close = user wants the session gone. tmux lives only on the
-        // Chatty host (SSH remotes never need tmux).
+        // Explicit close = user wants the session gone.
         if let Some(ref tmux_name) = live.tmux_name {
             let _ = kill_tmux_session(tmux_name);
         }
@@ -717,12 +740,18 @@ fn kill_tmux_session(tmux_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether Chatty will host new sessions under tmux on this machine.
+/// How new sessions are hosted on this machine.
 pub fn host_session_backend() -> SessionBackend {
-    if tmux_available() {
-        SessionBackend::Tmux
-    } else {
-        SessionBackend::Plain
+    use crate::host_client::{session_engine, SessionEngine};
+    match session_engine() {
+        SessionEngine::Host => SessionBackend::Host,
+        SessionEngine::Legacy => {
+            if tmux_available() {
+                SessionBackend::Tmux
+            } else {
+                SessionBackend::Plain
+            }
+        }
     }
 }
 
@@ -1329,6 +1358,7 @@ fn spawn_interactive_pty(
 
     let (cmd, backend) = build_session_command(session_id, shell, cwd)?;
     let label = match backend {
+        SessionBackend::Host => format!("host+{shell}"),
         SessionBackend::Tmux => format!("tmux+{shell}"),
         SessionBackend::Plain => shell.to_string(),
     };
@@ -1428,12 +1458,15 @@ fn spawn_interactive_pty(
 
 pub struct AppState {
     pub sessions: Mutex<SessionManager>,
+    /// Connected chatty-host client when using SessionEngine::Host.
+    pub host: Mutex<Option<crate::host_client::HostClient>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(SessionManager::new()),
+            host: Mutex::new(None),
         }
     }
 }

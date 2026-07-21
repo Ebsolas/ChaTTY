@@ -4,6 +4,7 @@
     pushComposerHistory,
   } from "$lib/composerHistory";
   import { mentionSuggestions } from "$lib/mentions";
+  import { setFocusRegion } from "$lib/focus";
   import { activeSessions, chordFor, stickySessionId } from "$lib/stores";
 
   interface Props {
@@ -284,6 +285,7 @@
     <input
       class="composer-input"
       data-composer-input
+      data-focus-region="composer"
       type="text"
       placeholder={stickyIsTui
         ? `@${stickyName} is in TUI — @another session to keep working`
@@ -295,6 +297,7 @@
       oninput={onInput}
       onclick={updateMentionState}
       onkeyup={onKeyup}
+      onfocus={() => setFocusRegion("composer")}
       autocomplete="off"
       spellcheck="false"
     />

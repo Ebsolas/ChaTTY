@@ -8,7 +8,12 @@ export type ActionId =
   | "newSession"
   | "closeSession"
   | "renameSession"
+  | "renameItem"
   | "focusComposer"
+  | "focusGroups"
+  | "focusConversations"
+  | "focusSessions"
+  | "jumpPalette"
   | "nextSession"
   | "prevSession"
   | "session1"
@@ -34,8 +39,14 @@ export const DEFAULT_BINDINGS: KeybindingsMap = {
   toggleTerminal: "Alt+Backquote",
   newSession: "Alt+N",
   closeSession: "Alt+W",
+  /** @deprecated alias of renameItem — kept for existing configs */
   renameSession: "Alt+R",
+  renameItem: "Alt+R",
   focusComposer: "Alt+C",
+  focusGroups: "Alt+G",
+  focusConversations: "Alt+Shift+C",
+  focusSessions: "Alt+S",
+  jumpPalette: "Alt+P",
   nextSession: "Alt+BracketRight",
   prevSession: "Alt+BracketLeft",
   session1: "Alt+1",
@@ -51,10 +62,15 @@ export const DEFAULT_BINDINGS: KeybindingsMap = {
 
 export const ACTION_LABELS: Record<ActionId, string> = {
   toggleTerminal: "Toggle session terminal",
-  newSession: "New session",
-  closeSession: "Close session",
-  renameSession: "Rename session",
+  newSession: "New item (focused rail)",
+  closeSession: "Close highlighted item",
+  renameSession: "Rename highlighted item",
+  renameItem: "Rename highlighted item",
   focusComposer: "Focus composer",
+  focusGroups: "Focus groups rail",
+  focusConversations: "Focus conversations rail",
+  focusSessions: "Focus sessions rail",
+  jumpPalette: "Jump palette",
   nextSession: "Next session",
   prevSession: "Previous session",
   session1: "Session 1",

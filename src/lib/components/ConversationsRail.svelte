@@ -2,22 +2,23 @@
   import type { Conversation, SessionInfo } from "$lib/types";
 
   interface Props {
-    /** Active group name shown in the header (click / double-click to rename). */
+    /** Active group name (display only — rename groups from the groups rail). */
     groupName?: string;
     conversations: Conversation[];
     activeId: string;
+    selectedId?: string | null;
+    focused?: boolean;
     sessions: SessionInfo[];
     creating?: boolean;
-    /** Conversation currently in rename mode. */
     renameTargetId?: string | null;
     onSelect?: (id: string) => void;
+    onHighlight?: (id: string) => void;
+    onFocusRegion?: () => void;
     onCreate?: () => void;
     onDelete?: (id: string) => void | Promise<void>;
     onRename?: (id: string, name: string) => void | Promise<void>;
     onBeginRename?: (id: string) => void;
     onCancelRename?: () => void;
-    /** Rename the active group (header title). */
-    onRenameGroup?: (name: string) => void | Promise<void>;
     onReorder?: (id: string, toIndex: number) => void;
     onMove?: (id: string, delta: -1 | 1) => void;
   }
@@ -26,16 +27,19 @@
     groupName = "Home",
     conversations,
     activeId,
+    selectedId = null,
+    focused = false,
     sessions,
     creating = false,
     renameTargetId = null,
     onSelect,
+    onHighlight,
+    onFocusRegion,
     onCreate,
     onDelete,
     onRename,
     onBeginRename,
     onCancelRename,
-    onRenameGroup,
     onReorder,
     onMove,
   }: Props = $props();
@@ -45,12 +49,7 @@
   let renaming = $state(false);
   let inputEl: HTMLInputElement | undefined = $state();
 
-  /** Inline edit of the group name in the pane header. */
-  let editingGroup = $state(false);
-  let groupEditValue = $state("");
-  let groupRenameError = $state<string | null>(null);
-  let groupRenaming = $state(false);
-  let groupInputEl: HTMLInputElement | undefined = $state();
+  const highlightId = $derived(selectedId ?? activeId);
 
   type MenuState = { conversationId: string; x: number; y: number } | null;
   let menu = $state<MenuState>(null);
@@ -107,7 +106,6 @@
 
   function beginRename(id: string) {
     closeMenu();
-    cancelGroupRename();
     onBeginRename?.(id);
   }
 
@@ -116,71 +114,6 @@
     renameError = null;
     renaming = false;
   }
-
-  function beginGroupRename() {
-    if (!onRenameGroup) return;
-    closeMenu();
-    onCancelRename?.();
-    editingGroup = true;
-    groupEditValue = groupName;
-    groupRenameError = null;
-    groupRenaming = false;
-    requestAnimationFrame(() => {
-      groupInputEl?.focus();
-      groupInputEl?.select();
-    });
-  }
-
-  function cancelGroupRename() {
-    editingGroup = false;
-    groupEditValue = "";
-    groupRenameError = null;
-    groupRenaming = false;
-  }
-
-  async function commitGroupRename() {
-    if (groupRenaming || !editingGroup) return;
-    const next = groupEditValue.trim();
-    if (!next) {
-      groupRenameError = "Name required";
-      return;
-    }
-    if (next.toLowerCase() === groupName.toLowerCase()) {
-      cancelGroupRename();
-      return;
-    }
-    groupRenaming = true;
-    groupRenameError = null;
-    try {
-      await onRenameGroup?.(next);
-      cancelGroupRename();
-    } catch (err) {
-      groupRenameError = String(err).replace(/^Error:\s*/, "");
-      groupRenaming = false;
-      requestAnimationFrame(() => groupInputEl?.focus());
-    }
-  }
-
-  function onGroupEditKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      e.stopPropagation();
-      void commitGroupRename();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      e.stopPropagation();
-      cancelGroupRename();
-    }
-  }
-
-  // Keep header edit value in sync when group switches while not editing.
-  $effect(() => {
-    void groupName;
-    if (!editingGroup) {
-      groupEditValue = groupName;
-      groupRenameError = null;
-    }
-  });
 
   async function commitRename(conversationId: string) {
     if (renaming) return;
@@ -314,39 +247,22 @@
   }}
 />
 
-<aside class="conversations-rail" aria-label="Conversations">
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+<aside
+  class="conversations-rail"
+  class:region-focused={focused}
+  aria-label="Conversations"
+  data-focus-region="conversations"
+  tabindex="0"
+  onfocus={() => onFocusRegion?.()}
+>
   <div class="pane-header">
-    {#if editingGroup}
-      <div class="group-rename">
-        <input
-          bind:this={groupInputEl}
-          class="group-rename-input"
-          bind:value={groupEditValue}
-          disabled={groupRenaming}
-          maxlength={48}
-          spellcheck="false"
-          aria-label="Group name"
-          onkeydown={onGroupEditKeydown}
-          onblur={() => void commitGroupRename()}
-        />
-        {#if groupRenameError}
-          <span class="group-rename-error">{groupRenameError}</span>
-        {/if}
-      </div>
-    {:else}
-      <button
-        type="button"
-        class="group-title"
-        title={`${groupName} — click to rename`}
-        onclick={beginGroupRename}
-      >
-        {groupName}
-      </button>
-    {/if}
+    <span class="group-title" title={groupName}>{groupName}</span>
     <button
       type="button"
       class="add-btn"
-      title="New conversation"
+      tabindex="-1"
+      title="New conversation (Alt+N when conversations focused)"
       disabled={creating}
       onclick={() => onCreate?.()}
     >
@@ -357,6 +273,8 @@
   <ul
     class="list"
     class:is-dragging={dragId != null}
+    role="listbox"
+    aria-label="Conversations"
     ondragleave={onDragLeaveList}
     ondrop={commitDrop}
   >
@@ -364,6 +282,7 @@
       {@const count = sessionCount(c.id)}
       {@const busy = hasBusy(c.id)}
       {@const isEditing = editingId === c.id}
+      {@const isSelected = highlightId === c.id}
       {#if showDropLine(i)}
         <li class="drop-line" aria-hidden="true"></li>
       {/if}
@@ -393,27 +312,69 @@
             <div class="rename-error">{renameError}</div>
           {/if}
         {:else}
-          <button
-            type="button"
-            class="convo-row"
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <!-- svelte-ignore a11y_interactive_supports_focus -->
+          <div
+            class="rail-row"
             class:active={c.id === activeId}
+            class:selected={isSelected}
             class:busy
-            onclick={() => onSelect?.(c.id)}
+            role="option"
+            aria-selected={isSelected}
+            tabindex="-1"
             oncontextmenu={(e) => openMenu(e, c.id)}
-            ondblclick={() => beginRename(c.id)}
-            title={busy
-              ? `${c.name} · work running in background · drag to reorder`
-              : `${c.name} · drag to reorder · double-click to rename`}
           >
-            <span class="grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
-            <span class="name">{c.name}</span>
-            <span class="meta">
-              {#if busy}
-                <span class="dot busy-dot" aria-hidden="true"></span>
-              {/if}
-              <span class="count muted">{count}</span>
-            </span>
-          </button>
+            <button
+              type="button"
+              class="rail-main"
+              tabindex="-1"
+              onclick={() => {
+                onHighlight?.(c.id);
+                onSelect?.(c.id);
+              }}
+              title={busy
+                ? `${c.name} · work running in background`
+                : `${c.name} · drag to reorder`}
+            >
+              <span class="grip" aria-hidden="true" title="Drag to reorder">⋮⋮</span>
+              <span class="meta">
+                <span class="name">{c.name}</span>
+                {#if busy}
+                  <span class="last mono">busy</span>
+                {/if}
+              </span>
+              <span class="muted sm" class:accent={busy}>
+                {#if busy}
+                  <span class="dot busy-dot" aria-hidden="true"></span>
+                {/if}
+                {count}
+              </span>
+            </button>
+            <div class="row-actions">
+              <button
+                type="button"
+                class="icon-btn"
+                tabindex="-1"
+                title="Rename (Alt+R)"
+                aria-label={`Rename ${c.name}`}
+                onclick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onHighlight?.(c.id);
+                  beginRename(c.id);
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path
+                    d="M11.5 1.5l3 3L5 14H2v-3L11.5 1.5z"
+                    stroke="currentColor"
+                    stroke-width="1.4"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
         {/if}
       </li>
     {/each}
@@ -518,6 +479,11 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    outline: none;
+  }
+
+  .conversations-rail.region-focused {
+    box-shadow: inset 2px 0 0 0 var(--accent, #4c8dff);
   }
 
   .pane-header {
@@ -535,56 +501,12 @@
   .group-title {
     flex: 1 1 0;
     min-width: 0;
-    margin: 0;
-    padding: 0.15rem 0.25rem;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    background: transparent;
-    font: inherit;
     font-weight: 600;
     font-size: 0.95rem;
     color: var(--text, #e8eaed);
-    text-align: left;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    cursor: text;
-  }
-
-  .group-title:hover {
-    border-color: var(--border, #232833);
-    background: var(--bg-elevated, #161a22);
-  }
-
-  .group-rename {
-    flex: 1 1 0;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-  }
-
-  .group-rename-input {
-    width: 100%;
-    box-sizing: border-box;
-    padding: 0.25rem 0.4rem;
-    border-radius: 6px;
-    border: 1px solid var(--accent, #4c8dff);
-    background: var(--bg-elevated, #161a22);
-    color: var(--text, #e8eaed);
-    font: inherit;
-    font-weight: 600;
-    font-size: 0.95rem;
-  }
-
-  .group-rename-input:focus {
-    outline: none;
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #4c8dff) 35%, transparent);
-  }
-
-  .group-rename-error {
-    font-size: 0.7rem;
-    color: var(--danger, #e35d6a);
   }
 
   .add-btn {
@@ -600,6 +522,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    padding: 0;
   }
 
   .add-btn:hover:not(:disabled) {
@@ -625,7 +548,178 @@
 
   .list li {
     margin: 0;
-    padding: 0 0.35rem;
+    width: 100%;
+  }
+
+  /* Match SessionsRail row layout */
+  .rail-row {
+    display: flex;
+    align-items: stretch;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .rail-row:hover {
+    background: color-mix(in srgb, var(--accent, #4c8dff) 8%, transparent);
+  }
+
+  .rail-row.active {
+    background: color-mix(in srgb, var(--accent, #4c8dff) 12%, transparent);
+  }
+
+  .rail-row.selected:not(.active) {
+    outline: 1px solid color-mix(in srgb, var(--accent, #4c8dff) 45%, transparent);
+    outline-offset: -1px;
+  }
+
+  .rail-row.busy {
+    background: color-mix(in srgb, var(--idle, #f0b429) 10%, transparent);
+  }
+
+  .rail-main {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 0;
+    width: 100%;
+    padding: 0.55rem 0.15rem 0.55rem 0.85rem;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .grip {
+    flex-shrink: 0;
+    font-size: 0.55rem;
+    letter-spacing: -0.05em;
+    color: var(--muted, #8b93a7);
+    opacity: 0.55;
+    cursor: grab;
+    user-select: none;
+    width: 0.9rem;
+  }
+
+  .meta {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+
+  .name {
+    font-weight: 600;
+    font-size: 0.9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .last {
+    font-size: 0.72rem;
+    opacity: 0.85;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .muted {
+    color: var(--muted, #8b93a7);
+  }
+
+  .sm {
+    font-size: 0.75rem;
+    flex-shrink: 0;
+    padding-right: 0.25rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
+  .sm.accent {
+    color: var(--idle, #f0b429);
+  }
+
+  .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+
+  .busy-dot {
+    background: var(--idle, #f0b429);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--idle, #f0b429) 55%, transparent);
+  }
+
+  .row-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.1rem;
+    padding-right: 0.35rem;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+  }
+
+  .rail-row:hover .row-actions,
+  .rail-row.active .row-actions,
+  .rail-row.selected .row-actions,
+  .rail-row:focus-within .row-actions {
+    opacity: 1;
+  }
+
+  .icon-btn {
+    width: 1.55rem;
+    height: 1.55rem;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted, #8b93a7);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .icon-btn:hover {
+    background: color-mix(in srgb, var(--accent, #4c8dff) 16%, transparent);
+    color: var(--text, #e8eaed);
+  }
+
+  .rename-row {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.45rem 0.55rem 0.45rem 0.85rem;
+  }
+
+  .rename-input {
+    flex: 1;
+    min-width: 0;
+    width: 100%;
+    border: 1px solid var(--accent, #4c8dff);
+    border-radius: 6px;
+    background: var(--bg-elevated, #161a22);
+    color: var(--text, #e8eaed);
+    padding: 0.3rem 0.4rem;
+    font-size: 0.85rem;
+    outline: none;
+  }
+
+  .rename-error {
+    padding: 0 0.85rem 0.35rem;
+    font-size: 0.72rem;
+    color: var(--danger, #e35d6a);
   }
 
   .list li.dragging {
@@ -633,7 +727,6 @@
   }
 
   .list.is-dragging {
-    /* Make empty space under the list a valid drop surface */
     min-height: 100%;
   }
 
@@ -658,116 +751,6 @@
 
   .drop-tail.active {
     box-shadow: inset 0 2px 0 0 var(--accent, #4c8dff);
-  }
-
-  .convo-row {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: flex-start;
-    gap: 0.35rem;
-    padding: 0.5rem 0.45rem;
-    margin: 0.1rem 0;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .convo-row:hover {
-    background: var(--bg-elevated, #161a22);
-    border-color: var(--border, #232833);
-  }
-
-  .convo-row.active {
-    background: color-mix(in srgb, var(--accent, #4c8dff) 14%, var(--bg-elevated, #161a22));
-    border-color: color-mix(in srgb, var(--accent, #4c8dff) 40%, var(--border, #232833));
-  }
-
-  .convo-row.busy:not(.active) .name {
-    color: var(--idle, #f0b429);
-  }
-
-  .grip {
-    flex-shrink: 0;
-    font-size: 0.55rem;
-    letter-spacing: -0.05em;
-    color: var(--muted, #8b93a7);
-    opacity: 0.55;
-    cursor: grab;
-    user-select: none;
-    width: 0.9rem;
-  }
-
-  .name {
-    font-weight: 600;
-    font-size: 0.9rem;
-    min-width: 0;
-    flex: 1 1 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .meta {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    flex-shrink: 0;
-  }
-
-  .count {
-    font-size: 0.75rem;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .muted {
-    color: var(--muted, #8b93a7);
-  }
-
-  .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    display: inline-block;
-  }
-
-  .busy-dot {
-    background: var(--idle, #f0b429);
-    box-shadow: 0 0 6px color-mix(in srgb, var(--idle, #f0b429) 55%, transparent);
-  }
-
-  .rename-row {
-    display: flex;
-    align-items: center;
-    padding: 0.25rem 0.15rem;
-  }
-
-  .rename-input {
-    width: 100%;
-    box-sizing: border-box;
-    padding: 0.4rem 0.5rem;
-    border-radius: 6px;
-    border: 1px solid var(--accent, #4c8dff);
-    background: var(--bg-elevated, #161a22);
-    color: var(--text, #e8eaed);
-    font: inherit;
-    font-weight: 600;
-    font-size: 0.9rem;
-  }
-
-  .rename-input:focus {
-    outline: none;
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #4c8dff) 35%, transparent);
-  }
-
-  .rename-error {
-    padding: 0 0.5rem 0.35rem;
-    font-size: 0.72rem;
-    color: var(--danger, #e35d6a);
   }
 
   .ctx-menu {

@@ -5,12 +5,16 @@
   interface Props {
     sessions: SessionInfo[];
     activeId: string | null;
+    selectedId?: string | null;
+    focused?: boolean;
     expandedId?: string | null;
     canRemove?: boolean;
     creating?: boolean;
     /** Session currently in rename mode (controlled from parent for Alt+R). */
     renameTargetId?: string | null;
     onOpen?: (sessionId: string) => void;
+    onHighlight?: (sessionId: string) => void;
+    onFocusRegion?: () => void;
     onCreate?: () => void;
     onClose?: (sessionId: string) => void;
     onRename?: (sessionId: string, name: string) => void | Promise<void>;
@@ -21,17 +25,23 @@
   let {
     sessions,
     activeId,
+    selectedId = null,
+    focused = false,
     expandedId = null,
     canRemove = true,
     creating = false,
     renameTargetId = null,
     onOpen,
+    onHighlight,
+    onFocusRegion,
     onCreate,
     onClose,
     onRename,
     onBeginRename,
     onCancelRename,
   }: Props = $props();
+
+  const highlightId = $derived(selectedId ?? activeId);
 
   let editValue = $state("");
   let renameError = $state<string | null>(null);
@@ -168,12 +178,20 @@
   }}
 />
 
-<aside class="sessions-rail">
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+<aside
+  class="sessions-rail"
+  class:region-focused={focused}
+  data-focus-region="sessions"
+  tabindex="0"
+  onfocus={() => onFocusRegion?.()}
+>
   <div class="pane-header">
     <span>Sessions</span>
     <button
       type="button"
       class="add-btn"
+      tabindex="-1"
       title={`New session (${chordFor("newSession")})`}
       disabled={creating}
       onclick={() => onCreate?.()}
@@ -184,21 +202,25 @@
   {#if sessions.length === 0}
     <div class="empty muted">No sessions yet</div>
   {:else}
-    <ul class="list">
+    <ul class="list" role="listbox" aria-label="Sessions">
       {#each sessions as s, i (s.id)}
         {@const label = statusLabel(s)}
         {@const isEditing = editingId === s.id}
+        {@const isSelected = highlightId === s.id}
         <li>
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <!-- svelte-ignore a11y_no_static_element_interactions a11y_interactive_supports_focus -->
           <div
             class="session-row"
             class:active={s.id === activeId}
+            class:selected={isSelected}
             class:expanded={s.id === expandedId}
             class:busy={s.activity === "busy"}
             class:tui={s.activity === "tui" || s.tuiActive}
             class:starting={s.starting || s.status === "starting"}
             class:editing={isEditing}
-            role="group"
+            role="option"
+            aria-selected={isSelected}
+            tabindex="-1"
             oncontextmenu={(e) => openMenu(e, s.id)}
           >
             {#if isEditing}
@@ -226,7 +248,11 @@
                 type="button"
                 class="session-main"
                 title={statusTitle(s, i)}
-                onclick={() => onOpen?.(s.id)}
+                tabindex="-1"
+                onclick={() => {
+                  onHighlight?.(s.id);
+                  onOpen?.(s.id);
+                }}
               >
                 <span
                   class="dot"
@@ -252,6 +278,7 @@
                 <button
                   type="button"
                   class="icon-btn"
+                  tabindex="-1"
                   title={`Rename (${chordFor("renameSession")})`}
                   aria-label={`Rename @${s.name}`}
                   onclick={(e) => {
@@ -274,6 +301,7 @@
                   <button
                     type="button"
                     class="icon-btn danger"
+                    tabindex="-1"
                     title={`Close (${chordFor("closeSession")})`}
                     aria-label={`Close @${s.name}`}
                     onclick={(e) => handleClose(e, s.id)}
@@ -358,6 +386,16 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    outline: none;
+  }
+
+  .sessions-rail.region-focused {
+    box-shadow: inset -2px 0 0 0 var(--accent, #4c8dff);
+  }
+
+  .session-row.selected:not(.active) {
+    outline: 1px solid color-mix(in srgb, var(--accent, #4c8dff) 45%, transparent);
+    outline-offset: -1px;
   }
 
   .pane-header {

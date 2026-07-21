@@ -1,11 +1,17 @@
-mod config;
-mod session;
-mod shell;
+pub mod config;
+pub mod host_client;
+pub mod host_protocol;
+pub mod host_server;
+pub mod session;
+pub mod shell;
 
 use config::{AppStateFile, KeybindingsPayload};
-use session::{host_session_backend, AppState, SessionInfo, DEFAULT_SESSION_NAME};
+use host_client::{resolve_host_binary, session_engine, HostClient, SessionEngine};
+use session::{
+    host_session_backend, AppState, SessionBackend, SessionInfo, DEFAULT_SESSION_NAME,
+};
 use std::path::PathBuf;
-use tauri::State;
+use tauri::{Emitter, Manager, State};
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -29,11 +35,26 @@ fn load_app_state() -> AppStateFile {
     config::load_app_state()
 }
 
-/// Session hosting mode on this machine: "tmux" | "plain".
-/// tmux is never required on SSH remotes — only on the Chatty host.
+/// Session hosting mode on this machine: "host" | "tmux" | "plain".
+/// `host` = chatty-host durable PTYs (preferred). `tmux`/`plain` = legacy.
 #[tauri::command]
 fn session_host_backend() -> String {
     host_session_backend().as_str().to_string()
+}
+
+fn ensure_host(state: &AppState, app: &tauri::AppHandle) -> Result<(), String> {
+    let mut slot = state
+        .host
+        .lock()
+        .map_err(|_| "host lock poisoned".to_string())?;
+    if slot.is_some() {
+        return Ok(());
+    }
+    let bin = resolve_host_binary();
+    let client = HostClient::ensure_connected(&bin)?;
+    client.set_app_emitter(app.clone());
+    *slot = Some(client);
+    Ok(())
 }
 
 #[tauri::command]
@@ -84,6 +105,61 @@ async fn create_session_async(
     let cwd_path = PathBuf::from(&reserved.cwd);
     let app_spawn = app.clone();
     let id_spawn = sid.clone();
+
+    // Durable host path (default on Unix): PTY lives in chatty-host.
+    if reserved.backend == "host" || host_session_backend() == SessionBackend::Host {
+        if let Err(e) = ensure_host(&state, &app) {
+            let mut mgr = state
+                .sessions
+                .lock()
+                .map_err(|_| "session lock poisoned".to_string())?;
+            mgr.abort_create(&app, &sid);
+            return Err(e);
+        }
+        let create_result = {
+            let host = state
+                .host
+                .lock()
+                .map_err(|_| "host lock poisoned".to_string())?;
+            let host = host
+                .as_ref()
+                .ok_or_else(|| "host client missing".to_string())?;
+            host.create(
+                &sid,
+                &shell,
+                &cwd_path.to_string_lossy(),
+                120,
+                40,
+            )
+            .and_then(|_| host.attach(&sid))
+        };
+        match create_result {
+            Ok(replay) => {
+                if !replay.is_empty() {
+                    let _ = app.emit(
+                        "session-output",
+                        session::SessionOutputEvent {
+                            session_id: sid.clone(),
+                            chunk: replay,
+                        },
+                    );
+                }
+                let mut mgr = state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session lock poisoned".to_string())?;
+                return mgr.finish_create_host(&sid);
+            }
+            Err(e) => {
+                let mut mgr = state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session lock poisoned".to_string())?;
+                mgr.abort_create(&app, &sid);
+                return Err(e);
+            }
+        }
+    }
 
     let spawn_result = tauri::async_runtime::spawn_blocking(move || {
         session::spawn_interactive_pty_public(&app_spawn, &id_spawn, &shell, &cwd_path)
@@ -142,6 +218,20 @@ fn close_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<(), String> {
+    let backend = {
+        let mgr = state
+            .sessions
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        mgr.backend_of(&session_id).ok()
+    };
+    if backend == Some(SessionBackend::Host) {
+        if let Ok(host) = state.host.lock() {
+            if let Some(h) = host.as_ref() {
+                let _ = h.destroy(&session_id);
+            }
+        }
+    }
     let mut mgr = state
         .sessions
         .lock()
@@ -197,6 +287,23 @@ fn send_raw(
     session_id: String,
     bytes: Vec<u8>,
 ) -> Result<(), String> {
+    let backend = {
+        let mgr = state
+            .sessions
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        mgr.backend_of(&session_id)?
+    };
+    if backend == SessionBackend::Host {
+        let host = state
+            .host
+            .lock()
+            .map_err(|_| "host lock poisoned".to_string())?;
+        let host = host
+            .as_ref()
+            .ok_or_else(|| "host client not connected".to_string())?;
+        return host.write_bytes(&session_id, &bytes);
+    }
     let mgr = state
         .sessions
         .lock()
@@ -211,6 +318,23 @@ fn resize_session(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    let backend = {
+        let mgr = state
+            .sessions
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        mgr.backend_of(&session_id)?
+    };
+    if backend == SessionBackend::Host {
+        let host = state
+            .host
+            .lock()
+            .map_err(|_| "host lock poisoned".to_string())?;
+        let host = host
+            .as_ref()
+            .ok_or_else(|| "host client not connected".to_string())?;
+        return host.resize(&session_id, cols, rows);
+    }
     let mgr = state
         .sessions
         .lock()
@@ -224,8 +348,18 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::new())
         .setup(|app| {
-            // Host-local tmux activity poll (process-level busy/TUI/cwd).
-            session::start_activity_poller(app.handle().clone());
+            // Prefer chatty-host (durable PTYs). Legacy tmux poller still runs when needed.
+            if session_engine() == SessionEngine::Host {
+                if let Some(state) = app.try_state::<AppState>() {
+                    if let Err(e) = ensure_host(state.inner(), app.handle()) {
+                        eprintln!("chatty: could not start chatty-host: {e}");
+                        eprintln!("chatty: set CHATTY_SESSION_ENGINE=legacy to use tmux/plain");
+                    }
+                }
+            } else {
+                // Legacy: process truth from host-local tmux.
+                session::start_activity_poller(app.handle().clone());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

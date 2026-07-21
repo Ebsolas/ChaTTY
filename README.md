@@ -63,11 +63,19 @@ config/keybindings.example.json
 |--------|---------|
 | Toggle session terminal | `Alt+`` |
 | Session 1–9 | `Alt+1` … `Alt+9` |
-| New session | `Alt+N` |
-| Close session | `Alt+W` |
-| Rename session | `Alt+R` |
+| New (focused rail) | `Alt+N` |
+| Close highlighted | `Alt+W` |
+| Rename highlighted | `Alt+R` |
 | Focus composer | `Alt+C` |
+| Focus groups / conversations / sessions | `Alt+G` / `Alt+Shift+C` / `Alt+S` |
+| Jump palette | `Alt+P` |
 | Next / previous session | `Alt+]` / `Alt+[` |
+| Cycle focus region | `Tab` / `Shift+Tab` (rails + composer only) |
+| List up / down (in focused rail) | `↑` `↓` or `k` `j` |
+| Activate selection | `Enter` |
+| Back out layers | `Esc` |
+
+**Rename** group, conversation, or session the same way: **right-click → Rename**, **pencil**, or **`Alt+R`** while the item is highlighted in the focused rail.
 
 ```bash
 npm run tauri dev
@@ -89,7 +97,7 @@ Hierarchy: **Group → Conversation → Sessions + chat**.
 |--------|--------|----------------|
 | Switch | Click icon | Click row |
 | New | `+` under icons (seeds conversation + session) | `+` in header (seeds a session) |
-| Rename | Click the **group name** in the conversations header | Double-click / context menu |
+| Rename | Pencil / context menu / `Alt+R` on highlight | Pencil / context menu / `Alt+R` on highlight |
 | Color | Context menu → Color… | — |
 | Reorder | Drag / Move up·down | Drag / Move up·down |
 | Delete | Context menu (kills nested sessions); last group reseeds **Home** | Context menu; last conversation reseeds **Main** |
@@ -106,16 +114,26 @@ On quit/restart Chatty restores **groups, conversations**, session **names, orde
 
 **Session hosting (this machine only):**
 
-| Host has `tmux` | Behavior |
-|-----------------|----------|
-| **Yes** | Each session is `tmux new-session -A -s chatty-<id> …` with `~/.config/chatty/tmux.conf` (status bar off). Quit Chatty **detaches**; htop/builds stay alive. Reopen Chatty **reattaches**. Closing a session in the rail runs `tmux kill-session` (confirm if busy/TUI). |
-| **No** | Plain login PTY (no reattach). Install tmux on the **Chatty host** for durable sessions. |
+Default engine is **`chatty-host`** (durable PTY process that outlives the UI — the cross-platform replacement for tmux’s role):
 
-**SSH remotes never need tmux.** Future SSH sessions run `ssh` *inside* host-local tmux; only this machine needs the dependency.
+| Piece | Role |
+|-------|------|
+| `chatty-host` | Owns PTYs, ring buffer, process activity; listens on `$XDG_RUNTIME_DIR/chatty/host.sock` |
+| Chatty UI | Attaches/detaches; quit does **not** kill host sessions |
+| Close session in rail | Host **destroys** that PTY (confirm if busy/TUI) |
 
-**Activity (busy / TUI)** on tmux sessions comes from `pane_current_command` (poll), not stream heuristics — so status-bar redraws no longer lock sessions. Chat turns seal when the foreground process returns to the shell (with a quiet-timeout backup for very fast commands).
+```bash
+# Optional overrides
+CHATTY_SESSION_ENGINE=host     # default on Unix
+CHATTY_SESSION_ENGINE=legacy   # old in-process tmux/plain path
+CHATTY_HOST_BIN=/path/to/chatty-host
+```
 
-Host-local `~/.config/chatty/tmux.conf` turns the status bar off; Chatty also forces `status off` per `chatty-*` session so existing sessions lose the green bar without touching your other tmux sessions.
+Build the host next to the app: `cargo build --manifest-path src-tauri/Cargo.toml --bin chatty-host`.
+
+Legacy fallback (`CHATTY_SESSION_ENGINE=legacy`): tmux when available, else plain PTY.
+
+**Activity (busy / TUI)** comes from the host’s process-tree poll (same idea as tmux `pane_current_command`, without requiring tmux).
 
 Closing a session that is **busy** or in a **TUI** is blocked with a warning until the job/UI exits (or you force-close later).
 

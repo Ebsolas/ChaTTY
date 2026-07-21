@@ -36,6 +36,10 @@
   /** Fixed for this mount ({#key sessionId} remounts the component). */
   let boundSessionId = "";
 
+  /** Cap open replay — full 500KB rings freeze the UI for hundreds of ms. */
+  const OPEN_HISTORY_MAX = 96_000;
+  const CHUNK = 48_000;
+
   onMount(() => {
     boundSessionId = sessionId;
     let cancelled = false;
@@ -64,13 +68,20 @@
       requestAnimationFrame(flushWrite);
     };
 
+    const doFit = () => {
+      if (!term || !fit || !host) return false;
+      if (host.clientWidth < 4 || host.clientHeight < 4) return false;
+      try {
+        fit.fit();
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
     const finishOpen = () => {
       if (cancelled || !term) return;
-      try {
-        fit?.fit();
-      } catch {
-        /* ignore */
-      }
+      doFit();
       void pushSize().finally(() => {
         if (cancelled || !term) return;
         // Let any deferred onData from the last history write settle first.
@@ -82,7 +93,54 @@
       });
     };
 
-    const boot = () => {
+    /** Wait until the absolute overlay has real layout before opening xterm. */
+    const waitForHostSize = (): Promise<void> =>
+      new Promise((resolve) => {
+        if (cancelled) {
+          resolve();
+          return;
+        }
+        const el = host;
+        if (!el) {
+          resolve();
+          return;
+        }
+        if (el.clientWidth >= 4 && el.clientHeight >= 4) {
+          resolve();
+          return;
+        }
+        let settled = false;
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          observer.disconnect();
+          clearTimeout(timer);
+          resolve();
+        };
+        const observer = new ResizeObserver(() => {
+          if (el.clientWidth >= 4 && el.clientHeight >= 4) done();
+        });
+        observer.observe(el);
+        // Fallback so we still boot if layout never reports (shouldn't happen).
+        const timer = setTimeout(done, 400);
+      });
+
+    const historyForOpen = (): string => {
+      let history = getPtyScrollback(boundSessionId);
+      if (!history) return "";
+      if (history.length > OPEN_HISTORY_MAX) {
+        history = history.slice(history.length - OPEN_HISTORY_MAX);
+        // Prefer starting at a line boundary so we don't splice mid-escape often.
+        const nl = history.indexOf("\n");
+        if (nl > 0 && nl < 512) history = history.slice(nl + 1);
+      }
+      return history;
+    };
+
+    const boot = async () => {
+      if (cancelled || !host) return;
+
+      await waitForHostSize();
       if (cancelled || !host) return;
 
       term = new Terminal({
@@ -112,6 +170,8 @@
       fit = new FitAddon();
       term.loadAddon(fit);
       term.open(host);
+      // Fit before history so cells match the host; avoids 0-size blank screens.
+      doFit();
 
       // Register early but gate with acceptInput (see above).
       term.onData((data) => {
@@ -125,9 +185,8 @@
         queueWrite(chunk);
       });
 
-      const history = getPtyScrollback(boundSessionId);
+      const history = historyForOpen();
       if (history) {
-        const CHUNK = 16_384;
         let offset = 0;
         const pump = () => {
           if (cancelled || !term) return;
@@ -154,19 +213,20 @@
       ro = new ResizeObserver(() => {
         if (resizeTimer) clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => {
-          if (!acceptInput) return; // ignore layout thrash during open
-          try {
-            fit?.fit();
-            void pushSize();
-          } catch {
-            /* ignore */
-          }
-        }, 120);
+          if (cancelled || !term) return;
+          // Always reflow the canvas once layout exists — gating on acceptInput
+          // left a blank terminal when the first fit ran at zero size.
+          if (!doFit()) return;
+          if (!acceptInput) return;
+          void pushSize();
+        }, 80);
       });
       if (host) ro.observe(host);
     };
 
-    const bootRaf = requestAnimationFrame(boot);
+    const bootRaf = requestAnimationFrame(() => {
+      void boot();
+    });
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -232,19 +292,20 @@
 
 <style>
   .overlay {
-    /* Placed by parent grid (chatTop + sessionRail). Not position:absolute. */
+    /* Cover chat-pane only — no grid participation, no reflow/slide. */
+    position: absolute;
+    inset: 0;
     z-index: 30;
-    display: grid;
-    grid-template-rows: auto minmax(0, 1fr);
+    display: flex;
+    flex-direction: column;
     min-height: 0;
     min-width: 0;
-    height: 100%;
-    width: 100%;
     background: #0d1017;
-    border-right: 1px solid var(--border, #232833);
+    border: none;
   }
 
   .bar {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -302,13 +363,17 @@
   }
 
   .term-host {
+    flex: 1 1 auto;
     min-height: 0;
-    height: 100%;
+    min-width: 0;
+    position: relative;
+    overflow: hidden;
     padding: 0.35rem 0.45rem 0.45rem;
   }
 
   .term-host :global(.xterm) {
     height: 100%;
+    width: 100%;
   }
 
   .term-host :global(.xterm-viewport) {
