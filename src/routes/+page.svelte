@@ -566,8 +566,11 @@
     if (region === "groups") {
       const id = get(selectedGroupId) ?? get(activeGroupId);
       if (id) {
+        selectedGroupId.set(id);
+        setActiveGroup(id);
+        renameConvoTargetId = null;
         renameGroupTargetId = id;
-        setFocusRegion("groups");
+        // Rename UI lives on the conversations header (group title).
       }
       return;
     }
@@ -782,7 +785,6 @@
       conversations={$conversations}
       sessions={$sessions}
       creating={creatingGroup}
-      renameTargetId={renameGroupTargetId}
       onSelect={(id) => {
         renameConvoTargetId = null;
         renameGroupTargetId = null;
@@ -793,12 +795,11 @@
       onFocusRegion={() => setFocusRegion("groups")}
       onCreate={handleCreateGroup}
       onDelete={handleDeleteGroup}
-      onRename={handleRenameGroup}
       onBeginRename={(id) => {
+        selectedGroupId.set(id);
+        setActiveGroup(id);
+        renameConvoTargetId = null;
         renameGroupTargetId = id;
-      }}
-      onCancelRename={() => {
-        renameGroupTargetId = null;
       }}
       onSetColor={(id, color) => setGroupColor(id, color)}
       onReorder={(id, toIndex) => reorderGroup(id, toIndex)}
@@ -817,6 +818,7 @@
 
     <ConversationsRail
       groupName={$activeGroup?.name ?? "Home"}
+      groupRenameActive={!!$activeGroupId && renameGroupTargetId === $activeGroupId}
       conversations={$activeGroupConversations}
       activeId={$activeConversationId}
       selectedId={$selectedConversationId}
@@ -835,10 +837,24 @@
       onDelete={handleDeleteConversation}
       onRename={handleRenameConversation}
       onBeginRename={(id) => {
+        renameGroupTargetId = null;
         renameConvoTargetId = id;
       }}
       onCancelRename={() => {
         renameConvoTargetId = null;
+      }}
+      onRenameGroup={async (name) => {
+        const id = get(activeGroupId);
+        if (id) await handleRenameGroup(id, name);
+      }}
+      onBeginGroupRename={() => {
+        const id = get(activeGroupId);
+        if (!id) return;
+        renameConvoTargetId = null;
+        renameGroupTargetId = id;
+      }}
+      onCancelGroupRename={() => {
+        renameGroupTargetId = null;
       }}
       onReorder={(id, toIndex) => reorderConversation(id, toIndex)}
       onMove={(id, delta) => moveConversation(id, delta)}

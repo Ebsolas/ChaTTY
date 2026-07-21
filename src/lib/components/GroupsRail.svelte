@@ -11,15 +11,13 @@
     conversations: Conversation[];
     sessions: SessionInfo[];
     creating?: boolean;
-    renameTargetId?: string | null;
     onSelect?: (id: string) => void;
     onHighlight?: (id: string) => void;
     onFocusRegion?: () => void;
     onCreate?: () => void;
     onDelete?: (id: string) => void | Promise<void>;
-    onRename?: (id: string, name: string) => void | Promise<void>;
+    /** Starts rename on the group title in the conversations header (not on the monogram). */
     onBeginRename?: (id: string) => void;
-    onCancelRename?: () => void;
     onSetColor?: (id: string, color: string) => void;
     onReorder?: (id: string, toIndex: number) => void;
     onMove?: (id: string, delta: -1 | 1) => void;
@@ -33,15 +31,12 @@
     conversations,
     sessions,
     creating = false,
-    renameTargetId = null,
     onSelect,
     onHighlight,
     onFocusRegion,
     onCreate,
     onDelete,
-    onRename,
     onBeginRename,
-    onCancelRename,
     onSetColor,
     onReorder,
     onMove,
@@ -54,82 +49,11 @@
   let dragId = $state<string | null>(null);
   let dropInsertAt = $state<number | null>(null);
 
-  let editValue = $state("");
-  let renameError = $state<string | null>(null);
-  let renaming = $state(false);
-  let inputEl: HTMLInputElement | undefined = $state();
-
-  const editingId = $derived(renameTargetId);
   const highlightId = $derived(selectedId ?? activeId);
-
-  $effect(() => {
-    const id = renameTargetId;
-    if (!id) {
-      editValue = "";
-      renameError = null;
-      renaming = false;
-      return;
-    }
-    const g = groups.find((x) => x.id === id);
-    editValue = g?.name ?? "";
-    renameError = null;
-    renaming = false;
-    requestAnimationFrame(() => {
-      inputEl?.focus();
-      inputEl?.select();
-    });
-  });
 
   function beginRename(id: string) {
     closeMenu();
     onBeginRename?.(id);
-  }
-
-  function cancelRename() {
-    onCancelRename?.();
-    renameError = null;
-    renaming = false;
-  }
-
-  async function commitRename(groupId: string) {
-    if (renaming) return;
-    if (editingId !== groupId) return;
-    const g = groups.find((x) => x.id === groupId);
-    if (!g) {
-      cancelRename();
-      return;
-    }
-    const next = editValue.trim();
-    if (!next) {
-      renameError = "Name required";
-      return;
-    }
-    if (next.toLowerCase() === g.name.toLowerCase()) {
-      cancelRename();
-      return;
-    }
-    renaming = true;
-    renameError = null;
-    try {
-      await onRename?.(groupId, next);
-      cancelRename();
-    } catch (err) {
-      renameError = String(err).replace(/^Error:\s*/, "");
-      renaming = false;
-      requestAnimationFrame(() => inputEl?.focus());
-    }
-  }
-
-  function onEditKeydown(e: KeyboardEvent, groupId: string) {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      e.stopPropagation();
-      void commitRename(groupId);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      e.stopPropagation();
-      cancelRename();
-    }
   }
 
   function hasBusy(groupId: string): boolean {
@@ -250,84 +174,42 @@
   >
     {#each groups as g, i (g.id)}
       {@const busy = hasBusy(g.id)}
-      {@const isEditing = editingId === g.id}
       {@const isSelected = highlightId === g.id}
       {#if showDropLine(i)}
         <li class="drop-line" aria-hidden="true"></li>
       {/if}
       <li
         class:dragging={dragId === g.id}
-        draggable={!isEditing}
+        draggable={true}
         ondragstart={(e) => onDragStart(e, g.id)}
         ondragover={(e) => onDragOverRow(e, g.id)}
         ondrop={commitDrop}
         ondragend={onDragEnd}
       >
-        {#if isEditing}
-          <div class="rename-wrap">
-            <input
-              bind:this={inputEl}
-              class="rename-input"
-              bind:value={editValue}
-              disabled={renaming}
-              maxlength={32}
-              spellcheck="false"
-              aria-label="Group name"
-              onkeydown={(e) => onEditKeydown(e, g.id)}
-              onblur={() => void commitRename(g.id)}
-            />
-            {#if renameError}
-              <div class="rename-error" title={renameError}>!</div>
+        <div class="group-wrap" class:selected={isSelected} class:active={g.id === activeId}>
+          <button
+            type="button"
+            class="group-btn"
+            class:active={g.id === activeId}
+            class:selected={isSelected}
+            class:busy
+            style:--group-color={g.color}
+            role="option"
+            aria-selected={isSelected}
+            tabindex="-1"
+            title={g.name}
+            onclick={() => {
+              onHighlight?.(g.id);
+              onSelect?.(g.id);
+            }}
+            oncontextmenu={(e) => openMenu(e, g.id)}
+          >
+            <span class="mono-circle">{groupMonogram(g.name)}</span>
+            {#if busy}
+              <span class="busy-pip" aria-hidden="true"></span>
             {/if}
-          </div>
-        {:else}
-          <div class="group-wrap" class:selected={isSelected} class:active={g.id === activeId}>
-            <button
-              type="button"
-              class="group-btn"
-              class:active={g.id === activeId}
-              class:selected={isSelected}
-              class:busy
-              style:--group-color={g.color}
-              role="option"
-              aria-selected={isSelected}
-              tabindex="-1"
-              title={g.name}
-              onclick={() => {
-                onHighlight?.(g.id);
-                onSelect?.(g.id);
-              }}
-              oncontextmenu={(e) => openMenu(e, g.id)}
-            >
-              <span class="mono-circle">{groupMonogram(g.name)}</span>
-              {#if busy}
-                <span class="busy-pip" aria-hidden="true"></span>
-              {/if}
-            </button>
-            <button
-              type="button"
-              class="icon-btn pencil"
-              tabindex="-1"
-              title="Rename (Alt+R)"
-              aria-label={`Rename ${g.name}`}
-              onclick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                onHighlight?.(g.id);
-                beginRename(g.id);
-              }}
-            >
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path
-                  d="M11.5 1.5l3 3L5 14H2v-3L11.5 1.5z"
-                  stroke="currentColor"
-                  stroke-width="1.4"
-                  stroke-linejoin="round"
-                />
-              </svg>
-            </button>
-          </div>
-        {/if}
+          </button>
+        </div>
       </li>
     {/each}
     {#if showDropLine(groups.length)}
@@ -481,62 +363,6 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-  }
-
-  .group-wrap .pencil {
-    opacity: 0;
-    position: absolute;
-    right: -0.15rem;
-    top: -0.15rem;
-    width: 1.1rem;
-    height: 1.1rem;
-    border-radius: 4px;
-    border: 1px solid var(--border, #232833);
-    background: var(--bg-elevated, #161a22);
-    color: var(--muted, #8b93a7);
-    padding: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-  }
-
-  .group-wrap:hover .pencil,
-  .group-wrap.selected .pencil,
-  .region-focused .group-wrap.selected .pencil {
-    opacity: 1;
-  }
-
-  .icon-btn.pencil:hover {
-    color: var(--accent, #4c8dff);
-    border-color: var(--accent, #4c8dff);
-  }
-
-  .rename-wrap {
-    width: 100%;
-    padding: 0 0.15rem;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-  }
-
-  .rename-input {
-    width: 100%;
-    max-width: 2.8rem;
-    box-sizing: border-box;
-    padding: 0.15rem;
-    border-radius: 4px;
-    border: 1px solid var(--accent, #4c8dff);
-    background: var(--bg-elevated, #161a22);
-    color: var(--text, #e8eaed);
-    font-size: 0.65rem;
-    text-align: center;
-  }
-
-  .rename-error {
-    color: var(--danger, #e35d6a);
-    font-size: 0.7rem;
-    font-weight: 700;
   }
 
   .group-btn.selected .mono-circle {
