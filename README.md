@@ -2,6 +2,8 @@
 
 Conversational terminal: Discord-style chat chrome over local (and later multi) shell sessions.
 
+Yes, this is vibecoded. It's only a proof of concept to see if it's possible. 
+
 **Repo:** [github.com/Ebsolas/Chatty](https://github.com/Ebsolas/Chatty)
 
 ## Stack
