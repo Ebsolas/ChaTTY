@@ -1,4 +1,4 @@
-# Chatty
+# ChaTTY
 
 Conversational terminal: Discord-style chat chrome over local (and later multi) shell sessions.
 
