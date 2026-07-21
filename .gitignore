@@ -15,11 +15,12 @@ target/
 **/*.rs.bk
 *.pdb
 **/mutants.out*/
-
+# Staged externalBin sidecars (built by scripts/stage-host-bin.sh)
+src-tauri/binaries/
 # IDE
 .idea/
 .vscode/*
 !.vscode/extensions.json
-
 # Local tooling (portable gh, etc.)
 .tools/
+squashfs-root/

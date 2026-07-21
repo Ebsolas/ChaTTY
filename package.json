@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "tauri": "tauri"
+    "stage:host": "bash scripts/stage-host-bin.sh",
+    "tauri": "tauri",
+    "tauri:build": "bash scripts/package-linux.sh"
   },
   "license": "MIT",
   "dependencies": {

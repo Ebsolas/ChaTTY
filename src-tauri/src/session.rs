@@ -371,7 +371,8 @@ impl SessionManager {
     }
 
     /// Attach a spawned PTY to a reserved session.
-    pub fn finish_create(
+    /// `pub(crate)` so the private `InteractivePty` type is not exposed in a public API.
+    pub(crate) fn finish_create(
         &mut self,
         session_id: &str,
         pty: InteractivePty,

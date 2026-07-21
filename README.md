@@ -23,12 +23,37 @@ Frontend-only (no native shell):
 npm run dev
 ```
 
+## Download (Linux)
+
+Prebuilt **AppImage** (x86_64) is attached to [GitHub Releases](https://github.com/Ebsolas/Chatty/releases):
+
+```bash
+chmod +x Chatty_*.AppImage
+./Chatty_*.AppImage
+```
+
+The AppImage bundles **chatty-host** for durable sessions. Windows builds are planned next.
+
 ## Build
 
 ```bash
-npm run tauri build
-# or: ./scripts/run-chatty.sh  (after build)
+# Stages chatty-host sidecar, then builds AppImage (+ deb on supported hosts)
+npm run tauri:build
+
+# Dev without packaging:
+npm run tauri dev
+
+# After a release binary build:
+./scripts/run-chatty.sh
 ```
+
+AppImage output:
+
+```text
+src-tauri/target/release/bundle/appimage/Chatty_*.AppImage
+```
+
+If `linuxdeploy` fails on Arch (gtk plugin path quirks), `npm run tauri:build` falls back to packing the prepared AppDir with `appimagetool`. Set `APPIMAGE_EXTRACT_AND_RUN=1` if FUSE is unavailable.
 
 ## Status
 

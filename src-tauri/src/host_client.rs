@@ -286,7 +286,13 @@ fn dispatch_host_event(app: &AppHandle, ev: &Event) {
     }
 }
 
-/// Resolve path to chatty-host binary (dev + installed).
+/// Resolve path to chatty-host binary (dev, AppImage/sidecar, installed).
+///
+/// Search order:
+/// 1. `CHATTY_HOST_BIN` override
+/// 2. Same directory as the Chatty UI executable (Tauri `externalBin` / AppImage)
+/// 3. Common resource layouts next to the exe
+/// 4. Bare `chatty-host` on `PATH`
 pub fn resolve_host_binary() -> PathBuf {
     if let Ok(p) = std::env::var("CHATTY_HOST_BIN") {
         let pb = PathBuf::from(p);
@@ -294,13 +300,38 @@ pub fn resolve_host_binary() -> PathBuf {
             return pb;
         }
     }
+
+    #[cfg(windows)]
+    const HOST_NAME: &str = "chatty-host.exe";
+    #[cfg(not(windows))]
+    const HOST_NAME: &str = "chatty-host";
+
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join("chatty-host");
-            if candidate.is_file() || candidate.exists() {
-                return candidate;
+            // AppImage / externalBin: sidecar sits next to the main binary.
+            let next_to_exe = dir.join(HOST_NAME);
+            if next_to_exe.is_file() {
+                return next_to_exe;
+            }
+            // Some layouts keep helpers one level up or under bin/.
+            for rel in ["bin", ".", ".."] {
+                let cand = dir.join(rel).join(HOST_NAME);
+                if cand.is_file() {
+                    return cand;
+                }
+            }
+            // AppImage mount: .../usr/bin/chatty → sibling chatty-host
+            // Also try unsuffixed path when current_exe is a symlink/wrapper.
+            if let Ok(canon) = exe.canonicalize() {
+                if let Some(cdir) = canon.parent() {
+                    let cand = cdir.join(HOST_NAME);
+                    if cand.is_file() {
+                        return cand;
+                    }
+                }
             }
         }
     }
-    PathBuf::from("chatty-host")
+
+    PathBuf::from(HOST_NAME)
 }
