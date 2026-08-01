@@ -8,10 +8,11 @@
   import Composer from "$lib/components/Composer.svelte";
   import ConversationsRail from "$lib/components/ConversationsRail.svelte";
   import GroupsRail from "$lib/components/GroupsRail.svelte";
-  import JumpPalette, { type JumpItem } from "$lib/components/JumpPalette.svelte";
+  import type { JumpItem } from "$lib/components/JumpPalette.svelte";
   import SessionsRail from "$lib/components/SessionsRail.svelte";
   import SessionTerminal from "$lib/components/SessionTerminal.svelte";
   import ToastStack from "$lib/components/ToastStack.svelte";
+  import TopBar from "$lib/components/TopBar.svelte";
   import {
     cycleFocusRegion,
     focusRegion,
@@ -774,22 +775,19 @@
   tabindex="-1"
   style={railWidthsStyle($railWidths)}
 >
-  <header class="topbar">
-    <div class="brand">
-      <span class="logo-mark">▶</span>
-      <span class="title">Chatty</span>
-    </div>
-    <div class="status" class:ok={$connected}>
-      <span class="dot"></span>
-      {#if booting}
-        Starting…
-      {:else if $connected}
-        Connected
-      {:else}
-        Offline
-      {/if}
-    </div>
-  </header>
+  <TopBar
+    booting={booting}
+    connected={$connected}
+    paletteOpen={$jumpPaletteOpen}
+    groups={$groups}
+    conversations={$conversations}
+    sessions={$sessions}
+    onPaletteOpenChange={(open) => {
+      jumpPaletteOpen.set(open);
+      if (open) setFocusRegion("palette");
+    }}
+    onPick={handleJumpPick}
+  />
 
   <main class="shell">
     <!--
@@ -983,19 +981,6 @@
   />
 </div>
 
-<!-- Sibling of .app — never a CSS grid item of the shell -->
-<JumpPalette
-  open={$jumpPaletteOpen}
-  groups={$groups}
-  conversations={$conversations}
-  sessions={$sessions}
-  onClose={() => {
-    jumpPaletteOpen.set(false);
-    setFocusRegion("sessions");
-  }}
-  onPick={handleJumpPick}
-/>
-
 <style>
   /*
    * Desktop shell: 100vh + named grid.
@@ -1079,15 +1064,7 @@
     left: 1px;
   }
 
-  .topbar {
-    grid-area: top;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.75rem 1rem;
-    border-bottom: 1px solid var(--border, #232833);
-    background: var(--bg-panel, #12151c);
-  }
+  /* TopBar owns grid-area: top via .topbar class on its root */
 
   /* Children of .shell become .app grid items */
   .shell {
@@ -1144,43 +1121,6 @@
   .app > :global(.composer-wrap) {
     grid-area: composer;
     min-width: 0;
-  }
-
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-weight: 600;
-  }
-
-  .logo-mark {
-    color: var(--accent, #4c8dff);
-    font-size: 0.85rem;
-  }
-
-  .status {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: 0.85rem;
-    color: var(--muted, #8b93a7);
-  }
-
-  .status.ok {
-    color: var(--ok, #3dd68c);
-  }
-
-  .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--muted, #8b93a7);
-    display: inline-block;
-  }
-
-  .status.ok .dot {
-    background: var(--ok, #3dd68c);
-    box-shadow: 0 0 8px color-mix(in srgb, var(--ok, #3dd68c) 60%, transparent);
   }
 
   .chat-body {

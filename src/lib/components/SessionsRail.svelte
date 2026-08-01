@@ -647,14 +647,27 @@
                 ></span>
                 <span class="meta">
                   <span class="mono name">@{s.name}</span>
-                  {#if (s.activity === "busy" || s.activity === "tui") && s.lastCommand}
-                    <span class="last mono">{s.lastCommand}</span>
-                  {:else if i < 9}
-                    <span class="last muted key-hint">{chordFor(`session${i + 1}` as "session1")}</span>
-                  {/if}
-                </span>
-                <span class="muted sm" class:accent={label === "busy" || label === "tui" || label === "starting"}>
-                  {label}
+                  <span class="subrow">
+                    <span class="sub-left mono">
+                      {#if (s.activity === "busy" || s.activity === "tui") && s.lastCommand}
+                        <span class="last">{s.lastCommand}</span>
+                      {:else if i < 9}
+                        <span class="last muted key-hint"
+                          >{chordFor(`session${i + 1}` as "session1")}</span
+                        >
+                      {:else}
+                        <span class="last muted">&nbsp;</span>
+                      {/if}
+                    </span>
+                    <span
+                      class="status-word muted"
+                      class:accent={label === "busy" ||
+                        label === "tui" ||
+                        label === "starting"}
+                    >
+                      {label}
+                    </span>
+                  </span>
                 </span>
               </button>
               <div class="row-actions">
@@ -1151,6 +1164,7 @@
   }
 
   .session-row {
+    position: relative;
     display: flex;
     align-items: stretch;
     width: 100%;
@@ -1190,7 +1204,8 @@
     gap: 0.5rem;
     flex: 1;
     min-width: 0;
-    padding: 0.55rem 0.15rem 0.55rem 0.85rem;
+    width: 100%;
+    padding: 0.5rem 0.55rem 0.5rem 0.85rem;
     border: none;
     background: transparent;
     color: inherit;
@@ -1199,19 +1214,28 @@
     cursor: pointer;
   }
 
+  /* Overlay: zero idle width so @name keeps the full row */
   .row-actions {
+    position: absolute;
+    top: 50%;
+    right: 0.25rem;
+    transform: translateY(-50%);
     display: flex;
     align-items: center;
-    gap: 0.1rem;
-    padding-right: 0.35rem;
+    gap: 0.05rem;
+    padding: 0.1rem;
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--bg-panel, #12151c) 88%, transparent);
     opacity: 0;
+    pointer-events: none;
     transition: opacity 0.12s ease;
+    z-index: 2;
   }
 
-  .session-row:hover .row-actions,
-  .session-row.active .row-actions,
-  .session-row:focus-within .row-actions {
+  /* Mouse hover only — not selected/active/keyboard focus */
+  .session-row:hover .row-actions {
     opacity: 1;
+    pointer-events: auto;
   }
 
   .icon-btn {
@@ -1334,7 +1358,7 @@
   .meta {
     display: flex;
     flex-direction: column;
-    gap: 0.1rem;
+    gap: 0.12rem;
     min-width: 0;
     flex: 1;
   }
@@ -1348,9 +1372,25 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-weight: 600;
+  }
+
+  .subrow {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .sub-left {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .last {
+    display: block;
     font-size: 0.68rem;
     color: var(--muted, #8b93a7);
     overflow: hidden;
@@ -1363,24 +1403,28 @@
     opacity: 0.75;
   }
 
-  .muted {
-    color: var(--muted, #8b93a7);
-  }
-
-  .sm {
-    font-size: 0.72rem;
-    margin-left: auto;
-    text-transform: capitalize;
+  .status-word {
     flex-shrink: 0;
+    font-size: 0.65rem;
+    text-transform: capitalize;
+    text-align: right;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .sm.accent {
+  .status-word.accent {
     color: var(--accent, #4c8dff);
     font-weight: 600;
   }
 
-  .session-row.tui .sm.accent {
+  .session-row.tui .status-word.accent {
     color: #c792ea;
+  }
+
+  .muted {
+    color: var(--muted, #8b93a7);
   }
 
   .empty {

@@ -469,7 +469,9 @@
                 {#if busy}
                   <span class="dot busy-dot" aria-hidden="true"></span>
                 {/if}
-                {count}
+                {#if count > 1}
+                  <span class="sess-count" title={`${count} sessions`}>{count}</span>
+                {/if}
               </span>
             </button>
             <div class="row-actions">
@@ -649,7 +651,6 @@
 
   .group-title-row .pencil {
     flex: 0 0 auto;
-    opacity: 0.55;
     width: 1.35rem;
     height: 1.35rem;
     border-radius: 6px;
@@ -661,11 +662,15 @@
     align-items: center;
     justify-content: center;
     cursor: pointer;
+    /* Hidden until mouse hover — not when rail is keyboard-focused */
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease;
   }
 
-  .group-title-row:hover .pencil,
-  .region-focused .group-title-row .pencil {
+  .group-title-row:hover .pencil {
     opacity: 1;
+    pointer-events: auto;
   }
 
   .group-title-row .pencil:hover {
@@ -744,8 +749,9 @@
     width: 100%;
   }
 
-  /* Match SessionsRail row layout */
+  /* Match SessionsRail: name-first, hover chrome overlays */
   .rail-row {
+    position: relative;
     display: flex;
     align-items: stretch;
     width: 100%;
@@ -772,11 +778,11 @@
   .rail-main {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.45rem;
     flex: 1;
     min-width: 0;
     width: 100%;
-    padding: 0.55rem 0.15rem 0.55rem 0.85rem;
+    padding: 0.55rem 0.55rem 0.55rem 0.85rem;
     border: none;
     background: transparent;
     color: inherit;
@@ -785,15 +791,27 @@
     cursor: pointer;
   }
 
+  /* Overlay grip — no idle width so conversation name stays full-width */
   .grip {
-    flex-shrink: 0;
+    position: absolute;
+    left: 0.15rem;
+    top: 50%;
+    transform: translateY(-50%);
     font-size: 0.55rem;
     letter-spacing: -0.05em;
     color: var(--muted, #8b93a7);
-    opacity: 0.55;
     cursor: grab;
     user-select: none;
-    width: 0.9rem;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease;
+    z-index: 2;
+  }
+
+  /* Mouse hover only — not selected/active/keyboard focus */
+  .rail-row:hover .grip {
+    opacity: 0.75;
+    pointer-events: auto;
   }
 
   .meta {
@@ -827,7 +845,6 @@
   .sm {
     font-size: 0.75rem;
     flex-shrink: 0;
-    padding-right: 0.25rem;
     display: inline-flex;
     align-items: center;
     gap: 0.3rem;
@@ -835,6 +852,11 @@
 
   .sm.accent {
     color: var(--idle, #f0b429);
+  }
+
+  .sess-count {
+    font-variant-numeric: tabular-nums;
+    opacity: 0.85;
   }
 
   .mono {
@@ -854,19 +876,26 @@
   }
 
   .row-actions {
+    position: absolute;
+    top: 50%;
+    right: 0.25rem;
+    transform: translateY(-50%);
     display: flex;
     align-items: center;
-    gap: 0.1rem;
-    padding-right: 0.35rem;
+    gap: 0.05rem;
+    padding: 0.1rem;
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--bg-panel, #12151c) 88%, transparent);
     opacity: 0;
+    pointer-events: none;
     transition: opacity 0.12s ease;
+    z-index: 2;
   }
 
-  .rail-row:hover .row-actions,
-  .rail-row.active .row-actions,
-  .rail-row.selected .row-actions,
-  .rail-row:focus-within .row-actions {
+  /* Mouse hover only — not selected/active/keyboard focus */
+  .rail-row:hover .row-actions {
     opacity: 1;
+    pointer-events: auto;
   }
 
   .icon-btn {
