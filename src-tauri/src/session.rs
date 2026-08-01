@@ -293,13 +293,14 @@ impl SessionManager {
     /// Reserve a session slot and unique name (PTY not ready yet).
     /// Keeps the manager lock short so other sessions stay responsive.
     ///
-    /// `fixed_id` / `preferred_cwd` are used when restoring saved sessions.
+    /// `fixed_id` / `preferred_cwd` / `shell_override` used when restoring or applying a profile.
     pub fn begin_create(
         &mut self,
         app: &AppHandle,
         name: Option<String>,
         fixed_id: Option<String>,
         preferred_cwd: Option<String>,
+        shell_override: Option<String>,
     ) -> Result<SessionInfo, String> {
         if self.sessions.len() >= self.max_sessions {
             return Err(format!(
@@ -323,7 +324,10 @@ impl SessionManager {
             None => Uuid::new_v4().to_string(),
         };
 
-        let shell = shell::resolve_shell();
+        let shell = shell_override
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(shell::resolve_shell);
         let flavor = ShellFlavor::detect(&shell);
         let cwd = preferred_cwd
             .map(PathBuf::from)

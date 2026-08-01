@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Group, SessionInfo, Conversation } from "$lib/types";
   import { GROUP_COLORS, groupMonogram } from "$lib/types";
+  import { portal } from "$lib/portal";
 
   interface Props {
     groups: Group[];
@@ -245,6 +246,7 @@
     <!-- svelte-ignore a11y_interactive_supports_focus -->
     <div
       class="ctx-menu"
+      use:portal
       style:left={`${Math.min(menu.x, window.innerWidth - 180)}px`}
       style:top={`${Math.min(menu.y, window.innerHeight - 260)}px`}
       role="menu"
@@ -500,7 +502,7 @@
 
   .ctx-menu {
     position: fixed;
-    z-index: 80;
+    z-index: var(--z-popup, 1000);
     min-width: 9.5rem;
     padding: 0.3rem;
     border-radius: 8px;

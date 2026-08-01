@@ -850,10 +850,31 @@ export function updateTurnBubble(
 /** Format PTY capture into a chat bubble (strip ANSI + command echo + prompt tail). */
 export function formatPtyCapture(raw: string, command: string): string {
   let b = stripAnsi(raw).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  b = stripLeadingCommandEcho(b, command);
-  b = stripTrailingPromptLines(b);
-  b = b.replace(/^\n+/, "").replace(/\n+$/, "");
-  return b;
+  // Drop CR leftovers mid-line (bash readline redraws).
+  b = b
+    .split("\n")
+    .map((line) => {
+      const sp = line.lastIndexOf("\r");
+      return sp >= 0 ? line.slice(sp + 1) : line;
+    })
+    .join("\n");
+
+  const afterEcho = stripLeadingCommandEcho(b, command);
+  const stripped = stripTrailingPromptLines(afterEcho)
+    .replace(/^\n+/, "")
+    .replace(/\n+$/, "");
+
+  if (stripped) return stripped;
+
+  // If heuristics wiped everything, keep non-echo content rather than "(no output)".
+  // Common with bash PS1 that looks "promptish" or multi-line prompts.
+  const fallback = stripLeadingCommandEcho(b, command)
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter((l) => l.length > 0 && !isStrictPromptOnly(l))
+    .join("\n")
+    .trim();
+  return fallback;
 }
 
 function stripLeadingCommandEcho(body: string, command: string): string {
@@ -868,9 +889,13 @@ function stripLeadingCommandEcho(body: string, command: string): string {
       continue;
     }
     // Shell may echo with prompt prefix on same line — drop if ends with cmd
-    if (t.endsWith(cmd) && t.length < cmd.length + 80) {
-      i++;
-      continue;
+    // and looks like `…$ cmd` / `…% cmd`, not bare output equal to cmd.
+    if (t !== cmd && t.endsWith(cmd) && t.length < cmd.length + 80) {
+      const before = t.slice(0, t.length - cmd.length);
+      if (/[#$%❯›]\s*$/.test(before) || /@.*[: ]/.test(before)) {
+        i++;
+        continue;
+      }
     }
     break;
   }
@@ -888,11 +913,22 @@ function stripTrailingPromptLines(body: string): string {
   return lines.join("\n");
 }
 
+/** Conservative: lone prompt chars or classic user@host:path$ tails. */
 function isPromptishLine(line: string): boolean {
   const t = line.trim();
   if (!t) return false;
   if (/^[#$%❯›]\s*$/.test(t)) return true;
-  if (t.length < 120 && /[#$%❯›]\s*$/.test(t)) return true;
+  // bash/zsh style: …user@host:…$ or ends with %# with short path-like prefix
+  if (t.length < 160 && /[@:].*[#$%❯›]\s*$/.test(t)) return true;
+  if (t.length < 40 && /^[\w./~-]+[#$%❯›]\s*$/.test(t)) return true;
+  return false;
+}
+
+function isStrictPromptOnly(line: string): boolean {
+  const t = line.trim();
+  if (!t) return true;
+  if (/^[#$%❯›]\s*$/.test(t)) return true;
+  if (t.length < 160 && /[@:].*[#$%❯›]\s*$/.test(t)) return true;
   return false;
 }
 

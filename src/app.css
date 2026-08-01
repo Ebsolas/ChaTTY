@@ -14,6 +14,10 @@
   --idle: #f0b429;
   --danger: #e35d6a;
   --radius: 10px;
+  /* Floating UI above rails / chat / terminal */
+  --z-popup: 1000;
+  --z-modal: 1100;
+  --z-toast: 1200;
 }
 
 html,

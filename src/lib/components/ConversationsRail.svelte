@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Conversation, SessionInfo } from "$lib/types";
+  import { portal } from "$lib/portal";
 
   interface Props {
     /** Active group display name (header title). */
@@ -522,6 +523,7 @@
     <!-- svelte-ignore a11y_interactive_supports_focus -->
     <div
       class="ctx-menu"
+      use:portal
       style:left={`${Math.min(menu.x, window.innerWidth - 200)}px`}
       style:top={`${Math.min(menu.y, window.innerHeight - 200)}px`}
       role="menu"
@@ -946,7 +948,7 @@
 
   .ctx-menu {
     position: fixed;
-    z-index: 80;
+    z-index: var(--z-popup, 1000);
     min-width: 10rem;
     padding: 0.3rem;
     border-radius: 8px;

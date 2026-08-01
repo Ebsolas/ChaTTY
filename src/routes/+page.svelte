@@ -593,12 +593,27 @@
     }
   }
 
-  async function handleCreateSession() {
+  /** Bump to open the session-type picker in SessionsRail (+ / Alt+N). */
+  let sessionCreateRequest = $state(0);
+
+  function handleCreateSession() {
+    if (creatingSession) return;
+    setFocusRegion("sessions");
+    sessionCreateRequest += 1;
+  }
+
+  async function handleCreateSessionWithProfile(
+    profileId: string,
+    sshTarget?: string,
+  ) {
     if (creatingSession) return;
     creatingSession = true;
     backendError.set(null);
     try {
-      const session = await createSession();
+      const session = await createSession(undefined, {
+        profileId,
+        sshTarget: sshTarget?.trim() || null,
+      });
       await new Promise<void>((r) => requestAnimationFrame(() => r()));
       activeSessionId.set(session.id);
       selectedSessionId.set(session.id);
@@ -777,34 +792,42 @@
   </header>
 
   <main class="shell">
-    <GroupsRail
-      groups={$groups}
-      activeId={$activeGroupId}
-      selectedId={$selectedGroupId}
-      focused={$focusRegion === "groups"}
-      conversations={$conversations}
-      sessions={$sessions}
-      creating={creatingGroup}
-      onSelect={(id) => {
-        renameConvoTargetId = null;
-        renameGroupTargetId = null;
-        selectedGroupId.set(id);
-        setActiveGroup(id);
-      }}
-      onHighlight={(id) => selectedGroupId.set(id)}
-      onFocusRegion={() => setFocusRegion("groups")}
-      onCreate={handleCreateGroup}
-      onDelete={handleDeleteGroup}
-      onBeginRename={(id) => {
-        selectedGroupId.set(id);
-        setActiveGroup(id);
-        renameConvoTargetId = null;
-        renameGroupTargetId = id;
-      }}
-      onSetColor={(id, color) => setGroupColor(id, color)}
-      onReorder={(id, toIndex) => reorderGroup(id, toIndex)}
-      onMove={(id, delta) => moveGroup(id, delta)}
-    />
+    <!--
+      Each rail lives in a single grid-cell host. Multi-root components
+      (aside + menus) must not be direct .shell children — with
+      display:contents those extra roots become auto-placed grid items and
+      collapse the side rails to full width.
+    -->
+    <div class="rail-host rail-host-groups">
+      <GroupsRail
+        groups={$groups}
+        activeId={$activeGroupId}
+        selectedId={$selectedGroupId}
+        focused={$focusRegion === "groups"}
+        conversations={$conversations}
+        sessions={$sessions}
+        creating={creatingGroup}
+        onSelect={(id) => {
+          renameConvoTargetId = null;
+          renameGroupTargetId = null;
+          selectedGroupId.set(id);
+          setActiveGroup(id);
+        }}
+        onHighlight={(id) => selectedGroupId.set(id)}
+        onFocusRegion={() => setFocusRegion("groups")}
+        onCreate={handleCreateGroup}
+        onDelete={handleDeleteGroup}
+        onBeginRename={(id) => {
+          selectedGroupId.set(id);
+          setActiveGroup(id);
+          renameConvoTargetId = null;
+          renameGroupTargetId = id;
+        }}
+        onSetColor={(id, color) => setGroupColor(id, color)}
+        onReorder={(id, toIndex) => reorderGroup(id, toIndex)}
+        onMove={(id, delta) => moveGroup(id, delta)}
+      />
+    </div>
 
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions a11y_no_static_element_interactions -->
     <div
@@ -816,49 +839,51 @@
       onpointerdown={(e) => onResizePointerDown(e, "convos", "right")}
     ></div>
 
-    <ConversationsRail
-      groupName={$activeGroup?.name ?? "Home"}
-      groupRenameActive={!!$activeGroupId && renameGroupTargetId === $activeGroupId}
-      conversations={$activeGroupConversations}
-      activeId={$activeConversationId}
-      selectedId={$selectedConversationId}
-      focused={$focusRegion === "conversations"}
-      sessions={$sessions}
-      creating={creatingConversation}
-      renameTargetId={renameConvoTargetId}
-      onSelect={(id) => {
-        renameConvoTargetId = null;
-        selectedConversationId.set(id);
-        setActiveConversation(id);
-      }}
-      onHighlight={(id) => selectedConversationId.set(id)}
-      onFocusRegion={() => setFocusRegion("conversations")}
-      onCreate={handleCreateConversation}
-      onDelete={handleDeleteConversation}
-      onRename={handleRenameConversation}
-      onBeginRename={(id) => {
-        renameGroupTargetId = null;
-        renameConvoTargetId = id;
-      }}
-      onCancelRename={() => {
-        renameConvoTargetId = null;
-      }}
-      onRenameGroup={async (name) => {
-        const id = get(activeGroupId);
-        if (id) await handleRenameGroup(id, name);
-      }}
-      onBeginGroupRename={() => {
-        const id = get(activeGroupId);
-        if (!id) return;
-        renameConvoTargetId = null;
-        renameGroupTargetId = id;
-      }}
-      onCancelGroupRename={() => {
-        renameGroupTargetId = null;
-      }}
-      onReorder={(id, toIndex) => reorderConversation(id, toIndex)}
-      onMove={(id, delta) => moveConversation(id, delta)}
-    />
+    <div class="rail-host rail-host-convos">
+      <ConversationsRail
+        groupName={$activeGroup?.name ?? "Home"}
+        groupRenameActive={!!$activeGroupId && renameGroupTargetId === $activeGroupId}
+        conversations={$activeGroupConversations}
+        activeId={$activeConversationId}
+        selectedId={$selectedConversationId}
+        focused={$focusRegion === "conversations"}
+        sessions={$sessions}
+        creating={creatingConversation}
+        renameTargetId={renameConvoTargetId}
+        onSelect={(id) => {
+          renameConvoTargetId = null;
+          selectedConversationId.set(id);
+          setActiveConversation(id);
+        }}
+        onHighlight={(id) => selectedConversationId.set(id)}
+        onFocusRegion={() => setFocusRegion("conversations")}
+        onCreate={handleCreateConversation}
+        onDelete={handleDeleteConversation}
+        onRename={handleRenameConversation}
+        onBeginRename={(id) => {
+          renameGroupTargetId = null;
+          renameConvoTargetId = id;
+        }}
+        onCancelRename={() => {
+          renameConvoTargetId = null;
+        }}
+        onRenameGroup={async (name) => {
+          const id = get(activeGroupId);
+          if (id) await handleRenameGroup(id, name);
+        }}
+        onBeginGroupRename={() => {
+          const id = get(activeGroupId);
+          if (!id) return;
+          renameConvoTargetId = null;
+          renameGroupTargetId = id;
+        }}
+        onCancelGroupRename={() => {
+          renameGroupTargetId = null;
+        }}
+        onReorder={(id, toIndex) => reorderConversation(id, toIndex)}
+        onMove={(id, delta) => moveConversation(id, delta)}
+      />
+    </div>
 
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions a11y_no_static_element_interactions -->
     <div
@@ -925,47 +950,51 @@
       {/if}
     </section>
 
-    <SessionsRail
-      sessions={$activeSessions}
-      activeId={$activeSessionId}
-      selectedId={$selectedSessionId}
-      focused={$focusRegion === "sessions"}
-      expandedId={$expandedSessionId}
-      creating={creatingSession}
-      renameTargetId={renameTargetId}
-      canRemove={true}
-      onOpen={handleOpenSession}
-      onHighlight={(id) => selectedSessionId.set(id)}
-      onFocusRegion={() => setFocusRegion("sessions")}
-      onCreate={handleCreateSession}
-      onClose={handleCloseSession}
-      onRename={handleRenameSession}
-      onBeginRename={(id) => {
-        renameTargetId = id;
-      }}
-      onCancelRename={() => {
-        renameTargetId = null;
-      }}
-    />
+    <div class="rail-host rail-host-sessions">
+      <SessionsRail
+        sessions={$activeSessions}
+        activeId={$activeSessionId}
+        selectedId={$selectedSessionId}
+        focused={$focusRegion === "sessions"}
+        expandedId={$expandedSessionId}
+        creating={creatingSession}
+        renameTargetId={renameTargetId}
+        openCreateRequest={sessionCreateRequest}
+        canRemove={true}
+        onOpen={handleOpenSession}
+        onHighlight={(id) => selectedSessionId.set(id)}
+        onFocusRegion={() => setFocusRegion("sessions")}
+        onCreate={handleCreateSessionWithProfile}
+        onClose={handleCloseSession}
+        onRename={handleRenameSession}
+        onBeginRename={(id) => {
+          renameTargetId = id;
+        }}
+        onCancelRename={() => {
+          renameTargetId = null;
+        }}
+      />
+    </div>
   </main>
 
   <Composer
     disabled={booting || !$connected}
     onSend={handleSend}
   />
-
-  <JumpPalette
-    open={$jumpPaletteOpen}
-    groups={$groups}
-    conversations={$conversations}
-    sessions={$sessions}
-    onClose={() => {
-      jumpPaletteOpen.set(false);
-      setFocusRegion("sessions");
-    }}
-    onPick={handleJumpPick}
-  />
 </div>
+
+<!-- Sibling of .app — never a CSS grid item of the shell -->
+<JumpPalette
+  open={$jumpPaletteOpen}
+  groups={$groups}
+  conversations={$conversations}
+  sessions={$sessions}
+  onClose={() => {
+    jumpPaletteOpen.set(false);
+    setFocusRegion("sessions");
+  }}
+  onPick={handleJumpPick}
+/>
 
 <style>
   /*
@@ -1065,20 +1094,34 @@
     display: contents;
   }
 
-  .shell > :global(aside.groups-rail) {
-    grid-area: groups;
+  /* One grid item per rail — hosts fill the cell; asides stretch inside */
+  .rail-host {
     min-height: 0;
     min-width: 0;
     overflow: hidden;
     z-index: 2;
+    display: flex;
+    flex-direction: column;
   }
 
-  .shell > :global(aside.conversations-rail) {
+  .rail-host-groups {
+    grid-area: groups;
+  }
+
+  .rail-host-convos {
     grid-area: convos;
+  }
+
+  .rail-host-sessions {
+    grid-area: sessionRail;
+  }
+
+  .rail-host > :global(aside) {
+    flex: 1 1 auto;
     min-height: 0;
     min-width: 0;
-    overflow: hidden;
-    z-index: 2;
+    width: 100%;
+    height: 100%;
   }
 
   .chat-pane {
@@ -1090,15 +1133,6 @@
     flex-direction: column;
     overflow: hidden;
     background: var(--bg, #0f1115);
-  }
-
-  /* SessionsRail root is <aside class="sessions-rail"> */
-  .shell > :global(aside.sessions-rail) {
-    grid-area: sessionRail;
-    min-height: 0;
-    min-width: 0;
-    overflow: hidden;
-    z-index: 2;
   }
 
   /* Terminal fills chat-pane only (position:absolute on .overlay itself) */

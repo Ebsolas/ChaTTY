@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Conversation, Group, SessionInfo } from "$lib/types";
+  import { portal } from "$lib/portal";
 
   export type JumpItem = {
     kind: "group" | "conversation" | "session";
@@ -112,6 +113,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="backdrop"
+    use:portal
     role="presentation"
     onclick={() => onClose?.()}
     onkeydown={(e) => {
@@ -173,7 +175,7 @@
   .backdrop {
     position: fixed;
     inset: 0;
-    z-index: 100;
+    z-index: var(--z-modal, 1100);
     background: rgba(0, 0, 0, 0.45);
     display: flex;
     align-items: flex-start;

@@ -2,6 +2,7 @@ pub mod config;
 pub mod host_client;
 pub mod host_protocol;
 pub mod host_server;
+pub mod profiles;
 pub mod session;
 pub mod shell;
 
@@ -73,7 +74,9 @@ fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionInfo>, String>
 
 /// Create a session without holding the manager lock during fork/exec.
 ///
-/// Optional `id` / `cwd` are used when restoring saved sessions.
+/// Optional `id` / `cwd` restore saved sessions. Optional `profile_id` selects
+/// a launch profile from `~/.config/chatty/profiles.json`.
+/// For SSH profiles, pass `ssh_target` as `user@host` or `host`.
 #[tauri::command]
 async fn create_session(
     app: tauri::AppHandle,
@@ -81,8 +84,15 @@ async fn create_session(
     name: Option<String>,
     id: Option<String>,
     cwd: Option<String>,
+    profile_id: Option<String>,
+    ssh_target: Option<String>,
 ) -> Result<SessionInfo, String> {
-    create_session_async(app, state, name, id, cwd).await
+    create_session_async(app, state, name, id, cwd, profile_id, ssh_target).await
+}
+
+#[tauri::command]
+fn list_shell_profiles() -> Result<profiles::ProfilesPayload, String> {
+    profiles::profiles_payload()
 }
 
 async fn create_session_async(
@@ -91,13 +101,28 @@ async fn create_session_async(
     name: Option<String>,
     id: Option<String>,
     cwd: Option<String>,
+    profile_id: Option<String>,
+    ssh_target: Option<String>,
 ) -> Result<SessionInfo, String> {
+    let spec =
+        profiles::resolve_spawn_spec(profile_id.as_deref(), ssh_target.as_deref())?;
+    // Explicit cwd arg wins; else profile cwd; else begin_create default.
+    let preferred_cwd = cwd
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| spec.cwd.clone());
+
     let reserved = {
         let mut mgr = state
             .sessions
             .lock()
             .map_err(|_| "session lock poisoned".to_string())?;
-        mgr.begin_create(&app, name, id, cwd)?
+        mgr.begin_create(
+            &app,
+            name,
+            id,
+            preferred_cwd,
+            Some(spec.shell.clone()),
+        )?
     };
 
     let sid = reserved.id.clone();
@@ -105,6 +130,8 @@ async fn create_session_async(
     let cwd_path = PathBuf::from(&reserved.cwd);
     let app_spawn = app.clone();
     let id_spawn = sid.clone();
+    let shell_args = spec.args.clone();
+    let shell_env = spec.env.clone();
 
     // Durable host path (default on Unix): PTY lives in chatty-host.
     if reserved.backend == "host" || host_session_backend() == SessionBackend::Host {
@@ -124,14 +151,24 @@ async fn create_session_async(
             let host = host
                 .as_ref()
                 .ok_or_else(|| "host client missing".to_string())?;
-            host.create(
-                &sid,
-                &shell,
-                &cwd_path.to_string_lossy(),
-                120,
-                40,
-            )
-            .and_then(|_| host.attach(&sid))
+
+            // Restore: if host already has this id, attach only (do not destroy).
+            let already = host.has_session(&sid).unwrap_or(false);
+            let result = if already {
+                host.attach(&sid)
+            } else {
+                host.create(
+                    &sid,
+                    &shell,
+                    &cwd_path.to_string_lossy(),
+                    shell_args.clone(),
+                    shell_env.clone(),
+                    120,
+                    40,
+                )
+                .and_then(|_| host.attach(&sid))
+            };
+            result
         };
         match create_result {
             Ok(replay) => {
@@ -206,6 +243,8 @@ async fn ensure_local_session(
         app,
         state,
         Some(DEFAULT_SESSION_NAME.to_string()),
+        None,
+        None,
         None,
         None,
     )
@@ -370,6 +409,7 @@ pub fn run() {
             save_app_state,
             session_host_backend,
             list_sessions,
+            list_shell_profiles,
             create_session,
             ensure_local_session,
             close_session,

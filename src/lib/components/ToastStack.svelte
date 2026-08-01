@@ -1,5 +1,6 @@
 <script lang="ts">
   import { dismissToast, toasts, type Toast } from "$lib/stores";
+  import { portal } from "$lib/portal";
 
   function onDismiss(t: Toast) {
     dismissToast(t.id);
@@ -7,7 +8,12 @@
 </script>
 
 {#if $toasts.length > 0}
-  <div class="toast-stack" aria-live="polite" aria-relevant="additions">
+  <div
+    class="toast-stack"
+    use:portal
+    aria-live="polite"
+    aria-relevant="additions"
+  >
     {#each $toasts as t (t.id)}
       <div class="toast" class:warn={t.level === "warn"} class:info={t.level === "info"} role="status">
         <span class="msg mono">{t.message}</span>
@@ -19,10 +25,10 @@
 
 <style>
   .toast-stack {
-    position: absolute;
+    position: fixed;
     right: 0.85rem;
     bottom: 0.85rem;
-    z-index: 40;
+    z-index: var(--z-toast, 1200);
     display: flex;
     flex-direction: column;
     gap: 0.45rem;

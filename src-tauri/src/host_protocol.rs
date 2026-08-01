@@ -42,6 +42,11 @@ pub struct CreateParams {
     pub session_id: String,
     pub shell: String,
     pub cwd: String,
+    /// Full argv after the shell binary (from user profiles). Empty → host may apply defaults.
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub cols: Option<u16>,
     #[serde(default)]

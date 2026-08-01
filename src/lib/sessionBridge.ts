@@ -1,6 +1,7 @@
 /**
- * Unified session hub: one interactive PTY per session.
- * Chat and session terminal are two views of the same shell.
+ * L2 session facade: intents, turn capture, event → store mapping.
+ * PTYs live in chatty-host (L4); this module does not attach on terminal open.
+ * See docs/architecture.md. Profiles: src/lib/session/profiles.ts
  */
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -497,6 +498,7 @@ export async function initSessionBridge(): Promise<void> {
             name: s.name ?? null,
             id: s.id ?? null,
             cwd: s.cwd ? s.cwd : null,
+            profileId: null,
           });
           const session = backendToSession(info, {
             starting: false,
@@ -822,12 +824,23 @@ function forgetSessionLocally(sessionId: string) {
  * The rail updates as soon as the backend emits `session-created` (before the
  * login shell finishes forking). This promise resolves when the PTY is ready.
  */
-export async function createSession(name?: string): Promise<SessionInfo> {
+export async function createSession(
+  name?: string,
+  opts?: {
+    profileId?: string | null;
+    cwd?: string | null;
+    id?: string | null;
+    /** For SSH profiles: `user@host` or `host`. */
+    sshTarget?: string | null;
+  },
+): Promise<SessionInfo> {
   const convoId = get(activeConversationId) || CONVO_MAIN_ID;
   const info = await invoke<BackendSessionInfo>("create_session", {
     name: name?.trim() ? name.trim() : null,
-    id: null,
-    cwd: null,
+    id: opts?.id ?? null,
+    cwd: opts?.cwd ?? null,
+    profileId: opts?.profileId ?? null,
+    sshTarget: opts?.sshTarget?.trim() ? opts.sshTarget.trim() : null,
   });
   const session = backendToSession(info, {
     starting: false,

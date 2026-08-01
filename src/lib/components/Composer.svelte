@@ -5,6 +5,7 @@
   } from "$lib/composerHistory";
   import { mentionSuggestions } from "$lib/mentions";
   import { setFocusRegion } from "$lib/focus";
+  import { clampPopupPosition, portal } from "$lib/portal";
   import { activeSessions, chordFor, stickySessionId } from "$lib/stores";
 
   interface Props {
@@ -16,6 +17,18 @@
   let value = $state("");
   let sending = $state(false);
   let inputEl: HTMLInputElement | undefined = $state();
+  let suggestPos = $state({ left: 0, bottom: 0, width: 0 });
+
+  function placeSuggest() {
+    const el = inputEl;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const width = Math.max(160, r.width);
+    const left = clampPopupPosition(r.left, 0, width, 1).left;
+    // Distance from viewport bottom to top of input (popup sits above it).
+    const bottom = Math.max(8, window.innerHeight - r.top + 6);
+    suggestPos = { left, bottom, width };
+  }
 
   /** Newest-first command history. */
   let history = $state<string[]>(loadComposerHistory());
@@ -240,12 +253,28 @@
       historyDraft = "";
     }
     updateMentionState();
+    if (mentionQuery !== null) placeSuggest();
   }
+
+  $effect(() => {
+    if (mentionQuery !== null && suggestions.length > 0) {
+      placeSuggest();
+    }
+  });
 </script>
+
+<svelte:window onresize={placeSuggest} />
 
 <div class="composer-wrap">
   {#if mentionQuery !== null && suggestions.length > 0}
-    <ul class="suggest" role="listbox">
+    <ul
+      class="suggest"
+      use:portal
+      role="listbox"
+      style:left="{suggestPos.left}px"
+      style:bottom="{suggestPos.bottom}px"
+      style:width="{suggestPos.width}px"
+    >
       {#each suggestions as s, i (s.id)}
         <li>
           <button
@@ -331,11 +360,8 @@
   }
 
   .suggest {
-    position: absolute;
-    left: 1rem;
-    right: 5.5rem;
-    bottom: 100%;
-    margin: 0 0 0.25rem;
+    position: fixed;
+    margin: 0;
     padding: 0.35rem 0;
     list-style: none;
     background: var(--bg-elevated, #161a22);
@@ -344,7 +370,7 @@
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
     max-height: 12rem;
     overflow-y: auto;
-    z-index: 30;
+    z-index: var(--z-popup, 1000);
   }
 
   .empty-suggest {

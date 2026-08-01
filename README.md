@@ -17,7 +17,9 @@ Conversational terminal: Discord-style chat chrome over local (and later multi) 
 
 ## Download (Linux)
 
-Prebuilt **AppImage** (x86_64) and `.deb` are on [GitHub Releases](https://github.com/Ebsolas/ChaTTY/releases):
+Prebuilt **AppImage** (x86_64), **portable `.tar.gz`**, and `.deb` are on [GitHub Releases](https://github.com/Ebsolas/ChaTTY/releases).
+
+### AppImage (typical desktop Linux)
 
 ```bash
 chmod +x Chatty_*.AppImage
@@ -26,7 +28,32 @@ chmod +x Chatty_*.AppImage
 
 On some desktops you may need “Allow launching” / execute permission in file properties.
 
-The AppImage includes **chatty-host** so sessions can outlive the UI. Windows builds are planned next.
+### SteamOS / Steam Deck (x86_64)
+
+SteamOS often **cannot mount AppImages** (no user FUSE). Prefer the **portable tarball** when available, or force extract-and-run:
+
+```bash
+# Option A — portable (recommended when attached to the release)
+tar -xzf Chatty_*_linux_x86_64_portable.tar.gz
+cd Chatty_*_linux_x86_64_portable
+./run-chatty.sh
+
+# Option B — AppImage without FUSE
+chmod +x Chatty_*.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 ./Chatty_*.AppImage
+```
+
+Tips:
+
+- Use **Desktop Mode**, not Gaming Mode, for a normal windowed app.
+- Run from a **terminal** so crash messages print.
+- If the window never appears, try:
+  ```bash
+  WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=x11 ./run-chatty.sh
+  ```
+- `.deb` is a poor fit on immutable SteamOS; use AppImage extract mode or the portable tarball.
+
+The bundles include **chatty-host** so sessions can outlive the UI. Windows builds are planned next.
 
 ## Develop
 
@@ -138,6 +165,14 @@ On quit/restart Chatty restores **groups, conversations**, session **names, orde
 ```text
 ~/.config/chatty/state.json
 ```
+
+**Shell profiles** (spawn templates — bash/zsh/ssh/etc.) live in:
+
+```text
+~/.config/chatty/profiles.json
+```
+
+Created on first run with auto-detected shells (`$SHELL` becomes the default when possible). Edit the file to add remotes or change args; see `docs/architecture.md`.
 
 ### Session hosting (this machine only)
 

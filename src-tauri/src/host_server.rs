@@ -746,14 +746,23 @@ fn create_session(state: &Arc<Mutex<HostState>>, p: CreateParams) -> Result<Sess
 
     let cwd = PathBuf::from(&p.cwd);
     let mut cmd = CommandBuilder::new(&p.shell);
-    // Login interactive where appropriate.
-    let base = Path::new(&p.shell)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if base.contains("zsh") || base.contains("bash") || base.contains("fish") {
-        cmd.arg("-l");
-        cmd.arg("-i");
+    // Prefer explicit profile args from the UI; fall back to login-interactive for shells.
+    if p.args.is_empty() {
+        let base = Path::new(&p.shell)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if base.contains("zsh") || base.contains("bash") || base.contains("fish") {
+            cmd.arg("-l");
+            cmd.arg("-i");
+        }
+    } else {
+        for a in &p.args {
+            cmd.arg(a);
+        }
+    }
+    for (k, v) in &p.env {
+        cmd.env(k, v);
     }
     if cwd.is_dir() {
         cmd.cwd(&cwd);

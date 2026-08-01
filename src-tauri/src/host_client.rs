@@ -147,6 +147,8 @@ impl HostClient {
         session_id: &str,
         shell: &str,
         cwd: &str,
+        args: Vec<String>,
+        env: std::collections::HashMap<String, String>,
         cols: u16,
         rows: u16,
     ) -> Result<SessionSummary, String> {
@@ -156,12 +158,18 @@ impl HostClient {
                 session_id: session_id.into(),
                 shell: shell.into(),
                 cwd: cwd.into(),
+                args,
+                env,
                 cols: Some(cols),
                 rows: Some(rows),
             })
             .unwrap_or(json!({})),
         )?;
         serde_json::from_value(v).map_err(|e| e.to_string())
+    }
+
+    pub fn has_session(&self, session_id: &str) -> Result<bool, String> {
+        Ok(self.list()?.iter().any(|s| s.session_id == session_id))
     }
 
     pub fn list(&self) -> Result<Vec<SessionSummary>, String> {

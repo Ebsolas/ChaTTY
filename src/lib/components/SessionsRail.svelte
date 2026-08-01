@@ -1,6 +1,14 @@
 <script lang="ts">
   import { chordFor } from "$lib/stores";
   import type { SessionInfo } from "$lib/types";
+  import {
+    listShellProfiles,
+    loadRecentSshTargets,
+    profileIsSsh,
+    rememberSshTarget,
+    type ShellProfile,
+  } from "$lib/session/profiles";
+  import { clampPopupPosition, portal } from "$lib/portal";
 
   interface Props {
     sessions: SessionInfo[];
@@ -12,10 +20,16 @@
     creating?: boolean;
     /** Session currently in rename mode (controlled from parent for Alt+R). */
     renameTargetId?: string | null;
+    /** Increment to open the profile picker (e.g. Alt+N from parent). */
+    openCreateRequest?: number;
     onOpen?: (sessionId: string) => void;
     onHighlight?: (sessionId: string) => void;
     onFocusRegion?: () => void;
-    onCreate?: () => void;
+    /** Create a session; sshTarget required for SSH profiles. */
+    onCreate?: (
+      profileId: string,
+      sshTarget?: string,
+    ) => void | Promise<void>;
     onClose?: (sessionId: string) => void;
     onRename?: (sessionId: string, name: string) => void | Promise<void>;
     onBeginRename?: (sessionId: string) => void;
@@ -31,6 +45,7 @@
     canRemove = true,
     creating = false,
     renameTargetId = null,
+    openCreateRequest = 0,
     onOpen,
     onHighlight,
     onFocusRegion,
@@ -54,6 +69,353 @@
     y: number;
   } | null;
   let menu = $state<MenuState>(null);
+
+  let createOpen = $state(false);
+  /** "type" = pick shell/SSH profile; "ssh" = enter destination. */
+  let createStep = $state<"type" | "ssh">("type");
+  let profiles = $state<ShellProfile[]>([]);
+  let defaultProfileId = $state("");
+  let profilesError = $state<string | null>(null);
+  let profileHighlight = $state(0);
+  let pendingProfileId = $state<string | null>(null);
+  let sshTarget = $state("");
+  let sshError = $state<string | null>(null);
+  let recentSsh = $state<string[]>([]);
+  let sshSuggestOpen = $state(false);
+  let sshSuggestHighlight = $state(0);
+  let createMenuEl: HTMLDivElement | undefined = $state();
+  let sshInputEl: HTMLInputElement | undefined = $state();
+  let addBtnEl: HTMLButtonElement | undefined = $state();
+  let createMenuPos = $state({ top: 0, left: 0 });
+  let lastCreateRequest = 0;
+
+  function placeCreateMenu() {
+    const btn = addBtnEl;
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const estW = createStep === "ssh" ? 260 : 220;
+    const estH = createStep === "ssh" ? 220 : 280;
+    // Align menu's top-right under the + button (opens into the chat).
+    const rawLeft = r.right - estW;
+    const rawTop = r.bottom + 6;
+    createMenuPos = clampPopupPosition(rawLeft, rawTop, estW, estH);
+  }
+
+  const filteredSshRecents = $derived.by(() => {
+    const q = sshTarget.trim().toLowerCase();
+    if (!q) return recentSsh;
+    return recentSsh.filter((t) => t.toLowerCase().includes(q));
+  });
+
+  /** Bumps when picker closes so in-flight open work cannot re-show a second pane. */
+  let createEpoch = 0;
+
+  $effect(() => {
+    const n = openCreateRequest;
+    if (n > lastCreateRequest) {
+      lastCreateRequest = n;
+      toggleCreatePicker();
+    }
+  });
+
+  // Hotkey focus moved to another rail/composer → dismiss the picker.
+  $effect(() => {
+    if (!focused && createOpen) {
+      closeCreatePicker();
+    }
+  });
+
+  async function loadProfiles() {
+    profilesError = null;
+    try {
+      const payload = await listShellProfiles();
+      profiles = payload.profiles;
+      defaultProfileId = payload.defaultProfileId;
+      const defIdx = profiles.findIndex((p) => p.id === defaultProfileId);
+      profileHighlight = defIdx >= 0 ? defIdx : 0;
+    } catch (err) {
+      profiles = [];
+      profilesError = String(err).replace(/^Error:\s*/, "");
+    }
+  }
+
+  /** Single entry point: open if closed, close if open — never stack panes. */
+  function toggleCreatePicker() {
+    if (creating) return;
+    if (createOpen) {
+      closeCreatePicker();
+      return;
+    }
+    void openCreatePicker();
+  }
+
+  async function openCreatePicker() {
+    if (creating) return;
+    // Never stack: if somehow still marked open, close first then re-open.
+    if (createOpen) {
+      closeCreatePicker();
+    }
+    closeMenu();
+    scrubOrphanCreateMenus();
+    const epoch = ++createEpoch;
+    createStep = "type";
+    pendingProfileId = null;
+    sshTarget = "";
+    sshError = null;
+    sshSuggestOpen = false;
+    placeCreateMenu();
+    createOpen = true;
+    await loadProfiles();
+    // Closed (or re-opened) while profiles were loading — abort this open.
+    if (epoch !== createEpoch || !createOpen) return;
+    requestAnimationFrame(() => {
+      if (epoch !== createEpoch || !createOpen) return;
+      placeCreateMenu();
+      // Refine with real size after paint.
+      const el = createMenuEl;
+      if (el && addBtnEl) {
+        const r = addBtnEl.getBoundingClientRect();
+        const w = el.offsetWidth || 220;
+        const h = el.offsetHeight || 200;
+        createMenuPos = clampPopupPosition(r.right - w, r.bottom + 6, w, h);
+      }
+      createMenuEl
+        ?.querySelector<HTMLButtonElement>(".profile-item.highlight")
+        ?.focus();
+    });
+  }
+
+  function onWindowReposition() {
+    if (createOpen) placeCreateMenu();
+  }
+
+  /** Drop any portaled create menus left on body after state says closed. */
+  function scrubOrphanCreateMenus() {
+    document
+      .querySelectorAll("[data-chatty-create-menu]")
+      .forEach((el) => el.remove());
+  }
+
+  function closeCreatePicker() {
+    createEpoch += 1;
+    createOpen = false;
+    createStep = "type";
+    pendingProfileId = null;
+    sshTarget = "";
+    sshError = null;
+    profilesError = null;
+    sshSuggestOpen = false;
+    createMenuEl = undefined;
+    // Portal may race Svelte unmount; force-remove leftovers on body.
+    queueMicrotask(() => {
+      if (!createOpen) scrubOrphanCreateMenus();
+    });
+  }
+
+  function isInsideCreateUi(target: EventTarget | null): boolean {
+    if (!(target instanceof Element)) return false;
+    // Use DOM attributes so this still works after portal moves the menu.
+    if (target.closest("[data-chatty-create-btn]")) return true;
+    if (target.closest("[data-chatty-create-menu]")) return true;
+    return false;
+  }
+
+  /**
+   * Capture-phase dismiss: click outside menu / + button closes the picker.
+   * + button is excluded here so its own handler can toggle (open ↔ close).
+   */
+  function onGlobalPointerDown(e: PointerEvent) {
+    const t = e.target;
+
+    if (menu) {
+      if (t instanceof Element && t.closest(".ctx-menu")) {
+        /* keep open */
+      } else {
+        closeMenu();
+      }
+    }
+
+    // + button: leave toggle to the button handler (must not close-then-open).
+    if (t instanceof Element && t.closest("[data-chatty-create-btn]")) {
+      return;
+    }
+
+    if (!createOpen) {
+      // State closed but a ghost may still be visible — kill it on any outside click.
+      if (
+        t instanceof Element &&
+        !t.closest("[data-chatty-create-menu]")
+      ) {
+        scrubOrphanCreateMenus();
+      }
+      return;
+    }
+
+    if (isInsideCreateUi(t)) return;
+    closeCreatePicker();
+  }
+
+  // Capture on window so terminal / other stopPropagation still dismisses.
+  $effect(() => {
+    const handler = (e: PointerEvent) => onGlobalPointerDown(e);
+    window.addEventListener("pointerdown", handler, true);
+    return () => window.removeEventListener("pointerdown", handler, true);
+  });
+
+  function openSshStep(profileId: string) {
+    pendingProfileId = profileId;
+    createStep = "ssh";
+    sshTarget = "";
+    sshError = null;
+    recentSsh = loadRecentSshTargets();
+    sshSuggestOpen = recentSsh.length > 0;
+    sshSuggestHighlight = 0;
+    placeCreateMenu();
+    requestAnimationFrame(() => {
+      placeCreateMenu();
+      const el = createMenuEl;
+      if (el && addBtnEl) {
+        const r = addBtnEl.getBoundingClientRect();
+        const w = el.offsetWidth || 260;
+        const h = el.offsetHeight || 220;
+        createMenuPos = clampPopupPosition(r.right - w, r.bottom + 6, w, h);
+      }
+      sshInputEl?.focus();
+      sshInputEl?.select();
+    });
+  }
+
+  async function pickProfile(profileId: string) {
+    if (creating) return;
+    const p = profiles.find((x) => x.id === profileId);
+    if (p && profileIsSsh(p)) {
+      openSshStep(profileId);
+      return;
+    }
+    closeCreatePicker();
+    await onCreate?.(profileId);
+  }
+
+  async function confirmSshTarget(target?: string) {
+    if (creating) return;
+    const profileId = pendingProfileId;
+    if (!profileId) return;
+    const t = (target ?? sshTarget).trim();
+    if (!t) {
+      sshError = "Destination required (e.g. user@host)";
+      return;
+    }
+    if (/\s/.test(t) && !t.startsWith("[")) {
+      sshError = "Use host or user@host (no spaces)";
+      return;
+    }
+    rememberSshTarget(t);
+    closeCreatePicker();
+    await onCreate?.(profileId, t);
+  }
+
+  function onCreateMenuKeydown(e: KeyboardEvent) {
+    if (!createOpen) return;
+
+    if (createStep === "ssh") {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (sshSuggestOpen && filteredSshRecents.length > 0) {
+          sshSuggestOpen = false;
+          return;
+        }
+        createStep = "type";
+        pendingProfileId = null;
+        sshError = null;
+        requestAnimationFrame(() => {
+          createMenuEl
+            ?.querySelector<HTMLButtonElement>(".profile-item.highlight")
+            ?.focus();
+        });
+        return;
+      }
+      return;
+    }
+
+    if (profiles.length === 0) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeCreatePicker();
+      return;
+    }
+    if (e.key === "ArrowDown" || e.key === "j") {
+      e.preventDefault();
+      profileHighlight = (profileHighlight + 1) % profiles.length;
+      return;
+    }
+    if (e.key === "ArrowUp" || e.key === "k") {
+      e.preventDefault();
+      profileHighlight = (profileHighlight - 1 + profiles.length) % profiles.length;
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const p = profiles[profileHighlight];
+      if (p) void pickProfile(p.id);
+    }
+  }
+
+  function onSshInputKeydown(e: KeyboardEvent) {
+    const list = filteredSshRecents;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (sshSuggestOpen && list.length > 0) {
+        sshSuggestOpen = false;
+        return;
+      }
+      createStep = "type";
+      pendingProfileId = null;
+      sshError = null;
+      requestAnimationFrame(() => {
+        createMenuEl
+          ?.querySelector<HTMLButtonElement>(".profile-item.highlight")
+          ?.focus();
+      });
+      return;
+    }
+    if (e.key === "ArrowDown" && list.length > 0) {
+      e.preventDefault();
+      sshSuggestOpen = true;
+      sshSuggestHighlight = (sshSuggestHighlight + 1) % list.length;
+      return;
+    }
+    if (e.key === "ArrowUp" && list.length > 0) {
+      e.preventDefault();
+      sshSuggestOpen = true;
+      sshSuggestHighlight =
+        (sshSuggestHighlight - 1 + list.length) % list.length;
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (
+        sshSuggestOpen &&
+        list.length > 0 &&
+        sshSuggestHighlight >= 0 &&
+        sshSuggestHighlight < list.length
+      ) {
+        const pick = list[sshSuggestHighlight];
+        sshTarget = pick;
+        void confirmSshTarget(pick);
+        return;
+      }
+      void confirmSshTarget();
+      return;
+    }
+    if (e.key === "Tab" && sshSuggestOpen && list.length > 0) {
+      e.preventDefault();
+      sshTarget = list[sshSuggestHighlight] ?? sshTarget;
+      sshSuggestOpen = false;
+    }
+  }
 
   const editingId = $derived(renameTargetId);
 
@@ -103,6 +465,7 @@
   function openMenu(e: MouseEvent, sessionId: string) {
     e.preventDefault();
     e.stopPropagation();
+    closeCreatePicker();
     menu = { sessionId, x: e.clientX, y: e.clientY };
   }
 
@@ -172,10 +535,14 @@
 </script>
 
 <svelte:window
-  onclick={() => closeMenu()}
   onkeydown={(e) => {
-    if (e.key === "Escape") closeMenu();
+    if (e.key === "Escape") {
+      closeMenu();
+      closeCreatePicker();
+    }
   }}
+  onresize={onWindowReposition}
+  onscroll={onWindowReposition}
 />
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -188,16 +555,32 @@
 >
   <div class="pane-header">
     <span>Sessions</span>
-    <button
-      type="button"
-      class="add-btn"
-      tabindex="-1"
-      title={`New session (${chordFor("newSession")})`}
-      disabled={creating}
-      onclick={() => onCreate?.()}
-    >
-      {creating ? "…" : "+"}
-    </button>
+    <div class="add-wrap">
+      <button
+        bind:this={addBtnEl}
+        type="button"
+        class="add-btn"
+        data-chatty-create-btn
+        tabindex="-1"
+        title={`New session (${chordFor("newSession")})`}
+        disabled={creating}
+        aria-haspopup="listbox"
+        aria-expanded={createOpen}
+        onpointerdown={(e) => {
+          // Capture-phase global handler skips this button; we own toggle here.
+          e.preventDefault();
+          e.stopPropagation();
+          toggleCreatePicker();
+        }}
+        onclick={(e) => {
+          // pointerdown already handled; block a following click from re-firing.
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+      >
+        {creating ? "…" : "+"}
+      </button>
+    </div>
   </div>
   {#if sessions.length === 0}
     <div class="empty muted">No sessions yet</div>
@@ -322,11 +705,135 @@
   </div>
 </aside>
 
+{#if createOpen}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="create-menu"
+    class:ssh-step={createStep === "ssh"}
+    data-chatty-create-menu
+    use:portal
+    bind:this={createMenuEl}
+    role={createStep === "type" ? "listbox" : "dialog"}
+    aria-label={createStep === "type" ? "Session type" : "SSH destination"}
+    tabindex="-1"
+    style:top="{createMenuPos.top}px"
+    style:left="{createMenuPos.left}px"
+    onkeydown={onCreateMenuKeydown}
+  >
+    {#if createStep === "ssh"}
+      <div class="create-menu-title">SSH destination</div>
+      <p class="ssh-help muted">user@host or host — same as the ssh CLI</p>
+      <div class="ssh-field">
+        <input
+          bind:this={sshInputEl}
+          class="ssh-input mono"
+          type="text"
+          placeholder="user@example.com"
+          bind:value={sshTarget}
+          spellcheck="false"
+          autocomplete="off"
+          autocapitalize="off"
+          aria-label="SSH destination"
+          aria-autocomplete="list"
+          oninput={() => {
+            sshError = null;
+            sshSuggestOpen = true;
+            sshSuggestHighlight = 0;
+          }}
+          onfocus={() => {
+            if (recentSsh.length > 0) sshSuggestOpen = true;
+          }}
+          onkeydown={onSshInputKeydown}
+        />
+        {#if sshSuggestOpen && filteredSshRecents.length > 0}
+          <ul class="ssh-suggest" role="listbox" aria-label="Recent destinations">
+            {#each filteredSshRecents as t, i (t)}
+              <li>
+                <button
+                  type="button"
+                  class="ssh-suggest-item mono"
+                  class:highlight={i === sshSuggestHighlight}
+                  role="option"
+                  aria-selected={i === sshSuggestHighlight}
+                  onmouseenter={() => (sshSuggestHighlight = i)}
+                  onclick={() => void confirmSshTarget(t)}
+                >
+                  {t}
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+      {#if sshError}
+        <div class="create-menu-error">{sshError}</div>
+      {/if}
+      <div class="ssh-actions">
+        <button
+          type="button"
+          class="ssh-btn ghost"
+          onclick={() => {
+            createStep = "type";
+            pendingProfileId = null;
+            sshError = null;
+            placeCreateMenu();
+            requestAnimationFrame(() => placeCreateMenu());
+          }}
+        >
+          Back
+        </button>
+        <button
+          type="button"
+          class="ssh-btn primary"
+          disabled={!sshTarget.trim()}
+          onclick={() => void confirmSshTarget()}
+        >
+          Connect
+        </button>
+      </div>
+      <div class="create-menu-hint muted">
+        ↑↓ recent · Enter connect · Esc back
+      </div>
+    {:else}
+      <div class="create-menu-title">Session type</div>
+      {#if profilesError}
+        <div class="create-menu-error">{profilesError}</div>
+      {:else if profiles.length === 0}
+        <div class="create-menu-empty muted">No profiles found</div>
+      {:else}
+        {#each profiles as p, i (p.id)}
+          <button
+            type="button"
+            class="profile-item"
+            class:highlight={i === profileHighlight}
+            class:is-default={p.id === defaultProfileId}
+            role="option"
+            aria-selected={i === profileHighlight}
+            onmouseenter={() => (profileHighlight = i)}
+            onclick={() => void pickProfile(p.id)}
+          >
+            <span class="profile-label">{p.label}</span>
+            <span class="profile-meta mono" title={p.shell}>
+              {p.id === defaultProfileId ? "default · " : ""}{profileIsSsh(p)
+                ? "ssh · enter host next"
+                : p.shell.split("/").pop()}
+            </span>
+          </button>
+        {/each}
+      {/if}
+      <div class="create-menu-hint muted">
+        Edit ~/.config/chatty/profiles.json
+      </div>
+    {/if}
+  </div>
+{/if}
+
 {#if menu && menuSession()}
   {@const ms = menuSession()!}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div
     class="ctx-menu"
+    use:portal
     style:left="{menu.x}px"
     style:top="{menu.y}px"
     role="menu"
@@ -406,6 +913,12 @@
     border-bottom: 1px solid var(--border, #232833);
     font-size: 0.9rem;
     color: var(--muted, #8b93a7);
+    position: relative;
+    z-index: 2;
+  }
+
+  .add-wrap {
+    position: relative;
   }
 
   .add-btn {
@@ -432,6 +945,200 @@
   .add-btn:disabled {
     opacity: 0.5;
     cursor: wait;
+  }
+
+  .create-menu {
+    position: fixed;
+    min-width: 12.5rem;
+    max-width: min(18rem, 80vw);
+    max-height: min(70vh, 28rem);
+    overflow-y: auto;
+    z-index: var(--z-popup, 1000);
+    border: 1px solid var(--border, #232833);
+    border-radius: 10px;
+    background: var(--bg-panel, #12151c);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+    padding: 0.35rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .create-menu.ssh-step {
+    min-width: 15rem;
+    max-height: min(70vh, 28rem);
+    overflow: visible;
+  }
+
+  .create-menu-title {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted, #8b93a7);
+    padding: 0.35rem 0.5rem 0.25rem;
+  }
+
+  .create-menu-error {
+    color: var(--danger, #e35d6a);
+    font-size: 0.8rem;
+    padding: 0.4rem 0.5rem;
+  }
+
+  .create-menu-empty {
+    font-size: 0.8rem;
+    padding: 0.5rem;
+  }
+
+  .create-menu-hint {
+    font-size: 0.65rem;
+    padding: 0.35rem 0.5rem 0.25rem;
+    border-top: 1px solid var(--border, #232833);
+    margin-top: 0.2rem;
+  }
+
+  .ssh-help {
+    font-size: 0.72rem;
+    margin: 0;
+    padding: 0 0.5rem 0.35rem;
+    line-height: 1.35;
+  }
+
+  .ssh-field {
+    position: relative;
+    padding: 0 0.35rem 0.25rem;
+  }
+
+  .ssh-input {
+    box-sizing: border-box;
+    width: 100%;
+    border: 1px solid var(--border, #232833);
+    border-radius: 7px;
+    background: var(--bg-elevated, #161a22);
+    color: var(--text, #e8eaed);
+    padding: 0.45rem 0.55rem;
+    font-size: 0.85rem;
+    outline: none;
+  }
+
+  .ssh-input:focus {
+    border-color: var(--accent, #4c8dff);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #4c8dff) 25%, transparent);
+  }
+
+  .ssh-suggest {
+    list-style: none;
+    margin: 0.25rem 0 0;
+    padding: 0.2rem;
+    border: 1px solid var(--border, #232833);
+    border-radius: 8px;
+    background: var(--bg-elevated, #161a22);
+    max-height: 9rem;
+    overflow-y: auto;
+  }
+
+  .ssh-suggest-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text, #e8eaed);
+    padding: 0.35rem 0.45rem;
+    font: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+
+  .ssh-suggest-item:hover,
+  .ssh-suggest-item.highlight {
+    background: color-mix(in srgb, var(--accent, #4c8dff) 16%, transparent);
+  }
+
+  .ssh-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.35rem;
+    padding: 0.25rem 0.35rem 0.15rem;
+  }
+
+  .ssh-btn {
+    border-radius: 6px;
+    border: 1px solid var(--border, #232833);
+    background: var(--bg-elevated, #161a22);
+    color: var(--text, #e8eaed);
+    font: inherit;
+    font-size: 0.8rem;
+    padding: 0.3rem 0.65rem;
+    cursor: pointer;
+  }
+
+  .ssh-btn:hover:not(:disabled) {
+    border-color: var(--accent, #4c8dff);
+  }
+
+  .ssh-btn.primary {
+    background: color-mix(in srgb, var(--accent, #4c8dff) 28%, transparent);
+    border-color: color-mix(in srgb, var(--accent, #4c8dff) 55%, var(--border, #232833));
+    color: var(--text, #e8eaed);
+    font-weight: 600;
+  }
+
+  .ssh-btn.primary:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .ssh-btn.ghost {
+    background: transparent;
+  }
+
+  .profile-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.1rem;
+    width: 100%;
+    text-align: left;
+    border: none;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text, #e8eaed);
+    padding: 0.4rem 0.5rem;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .profile-item:hover,
+  .profile-item.highlight {
+    background: color-mix(in srgb, var(--accent, #4c8dff) 16%, transparent);
+  }
+
+  .profile-label {
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+
+  .profile-meta {
+    font-size: 0.7rem;
+    color: var(--muted, #8b93a7);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .profile-item.is-default .profile-label::after {
+    content: "";
+  }
+
+  .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  .muted {
+    color: var(--muted, #8b93a7);
   }
 
   .list {
@@ -689,7 +1396,7 @@
 
   .ctx-menu {
     position: fixed;
-    z-index: 1000;
+    z-index: var(--z-popup, 1000);
     min-width: 12rem;
     padding: 0.3rem;
     border-radius: 10px;

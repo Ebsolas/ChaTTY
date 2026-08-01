@@ -49,15 +49,15 @@ jobs:
       - name: Build AppImage (+ deb when available)
         run: npm run tauri:build
         env:
-          # Avoid interactive prompts; CI is headless.
           CI: true
-          # Run AppImage tooling without FUSE mount (common on runners).
           APPIMAGE_EXTRACT_AND_RUN: "1"
 
       - name: Collect artifacts
         run: |
+          set -euo pipefail
           mkdir -p dist-release
           find src-tauri/target/release/bundle -type f \( -name '*.AppImage' -o -name '*.deb' \) -print -exec cp -v {} dist-release/ \;
+          bash scripts/make-portable-tarball.sh dist-release
           ls -lah dist-release
 
       - name: Upload build artifacts
@@ -97,29 +97,35 @@ jobs:
 
             | File | Notes |
             |------|--------|
-            | `*.AppImage` | **Recommended** — no install; run in place |
-            | `*.deb` | Debian/Ubuntu package |
+            | `*_portable.tar.gz` | **Prefer on SteamOS / no FUSE** — extract and `./run-chatty.sh` |
+            | `*.AppImage` | Most desktops; may need extract-and-run on SteamOS |
+            | `*.deb` | Debian/Ubuntu only (not SteamOS) |
+
+            **Portable (SteamOS-friendly)**
+            ```bash
+            tar -xzf Chatty_*_linux_x86_64_portable.tar.gz
+            cd Chatty_*_linux_x86_64_portable
+            ./run-chatty.sh
+            ```
+            Use **Desktop Mode** and a terminal so errors show. If the window is blank:
+            ```bash
+            WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=x11 ./run-chatty.sh
+            ```
 
             **AppImage**
             ```bash
             chmod +x Chatty_*.AppImage
             ./Chatty_*.AppImage
+            # SteamOS / no FUSE:
+            APPIMAGE_EXTRACT_AND_RUN=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 ./Chatty_*.AppImage
             ```
-            On some desktops you may need “Allow launching” / “Execute” in file properties.
 
-            The AppImage includes **chatty-host** (durable session backend). Sessions keep running if you quit the UI and relaunch.
-
-            ### Highlights
-            - Multi-session chat + full session terminal views
-            - Groups, conversations, and sessions rails
-            - Durable PTY host (`chatty-host`)
-            - Keyboard focus regions, jump palette (`Alt+P`), resizable rails
+            Bundles include **chatty-host** (durable session backend).
 
             ### Develop from source
             ```bash
             npm install
             npm run tauri dev
-            # release build with host sidecar:
             npm run tauri:build
             ```
 
