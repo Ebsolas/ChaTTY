@@ -15,7 +15,15 @@ if [[ -z "${APPDIR}" || ! -d "${APPDIR}/usr/bin" ]]; then
 fi
 
 VERSION="$(node -p "require('./package.json').version" 2>/dev/null || echo "0.0.0")"
-ARCH_LABEL="${PORTABLE_ARCH_LABEL:-linux_x86_64}"
+if [[ -n "${PORTABLE_ARCH_LABEL:-}" ]]; then
+  ARCH_LABEL="$PORTABLE_ARCH_LABEL"
+else
+  case "$(uname -m)" in
+    x86_64|amd64) ARCH_LABEL=linux_x86_64 ;;
+    aarch64|arm64) ARCH_LABEL=linux_aarch64 ;;
+    *) ARCH_LABEL="linux_$(uname -m)" ;;
+  esac
+fi
 NAME="Chatty_${VERSION}_${ARCH_LABEL}_portable"
 OUT_DIR="${DIST}/${NAME}"
 
