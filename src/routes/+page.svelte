@@ -24,6 +24,7 @@
     focusChatPane,
     focusNextPane,
     focusPaneDirection,
+    focusedPaneZoomKey,
     movePaneDirection,
     openSessionInNewPane,
     resizePaneDirection,
@@ -31,6 +32,15 @@
     swapWithNeighbor,
     termPaneSessionId,
   } from "$lib/mainSurface";
+  import {
+    APP_ZOOM_STEP,
+    nudgeAppZoom,
+    nudgePaneZoom,
+    PANE_ZOOM_STEP,
+    resetAppZoom,
+    resetPaneZoom,
+    sessionZoomKey,
+  } from "$lib/zoom";
   import {
     cycleFocusRegion,
     focusRegion,
@@ -487,20 +497,8 @@
         return;
       }
       case "openInPane": {
-        // Always new pane — never rebind an existing term leaf.
-        const id =
-          get(selectedSessionId) ??
-          get(activeSessionId) ??
-          get(stickySessionId) ??
-          get(activeSessions)[0]?.id ??
-          null;
-        if (id) {
-          activeSessionId.set(id);
-          stickySessionId.set(id);
-          openSessionInNewPane(id);
-        } else {
-          splitFocused("col", { sessionId: null, newKind: "term" });
-        }
+        // Always a new empty pane + session picker (never auto-fill sticky).
+        splitFocused("col", { sessionId: null, newKind: "term" });
         return;
       }
       case "replacePaneSession": {
@@ -664,7 +662,38 @@
         openSessionInNewPane(target.id);
         return;
       }
+      case "zoomPaneIn": {
+        const key = paneZoomTargetKey();
+        if (key) nudgePaneZoom(key, PANE_ZOOM_STEP);
+        return;
+      }
+      case "zoomPaneOut": {
+        const key = paneZoomTargetKey();
+        if (key) nudgePaneZoom(key, -PANE_ZOOM_STEP);
+        return;
+      }
+      case "zoomPaneReset": {
+        const key = paneZoomTargetKey();
+        if (key) resetPaneZoom(key);
+        return;
+      }
+      case "zoomAppIn":
+        nudgeAppZoom(APP_ZOOM_STEP);
+        return;
+      case "zoomAppOut":
+        nudgeAppZoom(-APP_ZOOM_STEP);
+        return;
+      case "zoomAppReset":
+        resetAppZoom();
+        return;
     }
+  }
+
+  /** Focused workspace pane, or expanded terminal overlay session. */
+  function paneZoomTargetKey(): string | null {
+    const expanded = get(expandedSessionId);
+    if (expanded) return sessionZoomKey(expanded);
+    return focusedPaneZoomKey();
   }
 
   function cycleSession(delta: number) {

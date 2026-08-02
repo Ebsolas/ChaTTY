@@ -14,6 +14,7 @@
     type DropEdge,
     type PaneNode,
   } from "$lib/mainSurface";
+  import { chatZoomKey, getPaneZoom, paneZoomKey, paneZooms } from "$lib/zoom";
   import ChatView from "./ChatView.svelte";
   import MainViewHeader from "./MainViewHeader.svelte";
   import SessionTerminal from "./SessionTerminal.svelte";
@@ -40,9 +41,15 @@
 
   const ws = $derived($workspace);
   const pendingReplace = $derived($replaceRestore);
+  const zooms = $derived($paneZooms);
   const pickList = $derived(
     activeSessions.length > 0 ? activeSessions : sessions,
   );
+
+  function zoomForPane(paneId: string, kind: "chat" | "term"): number {
+    const key = kind === "chat" ? chatZoomKey() : paneZoomKey(paneId);
+    return zooms[key] ?? getPaneZoom(key);
+  }
 
   let pickerFilter = $state("");
   let pickerHighlight = $state(0);
@@ -393,20 +400,28 @@
       class:drop-target={drag && drag.overId === node.id}
       data-pane-id={node.id}
       role="presentation"
+      style:--pane-zoom={zoomForPane(node.id, "chat")}
       onclick={() => setFocusedPane(node.id)}
       oncontextmenu={(e) => openCtx(e, node.id)}
     >
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="pane-id-bar chat-id drag-handle"
-        title="Chat pane — drag to reorganize"
+        title="Chat pane — drag to reorganize · Ctrl± zoom pane"
         onpointerdown={(e) => startPaneDrag(e, node.id, "Chat")}
       >
         <span class="pane-id-label">Chat</span>
         <span class="pane-id-meta muted">{conversationTitle}</span>
+        {#if zoomForPane(node.id, "chat") !== 1}
+          <span class="pane-zoom-badge muted"
+            >{Math.round(zoomForPane(node.id, "chat") * 100)}%</span
+          >
+        {/if}
         <span class="drag-hint muted" aria-hidden="true">⋮⋮</span>
       </div>
-      <ChatView {messages} {onOpenSession} />
+      <div class="chat-zoom-host">
+        <ChatView {messages} {onOpenSession} />
+      </div>
       {#if drag && drag.overId === node.id && drag.edge}
         <div class="drop-zone" class:edge={drag.edge} data-edge={drag.edge}></div>
       {/if}
@@ -433,7 +448,7 @@
           class:busy={meta?.activity === "busy"}
           class:tui={meta?.activity === "tui" || meta?.tuiActive}
           class:exited={meta?.status === "exited"}
-          title={`${label}${st ? ` · ${st}` : ""} — drag to reorganize`}
+          title={`${label}${st ? ` · ${st}` : ""} — drag to reorganize · Ctrl± zoom pane`}
           onpointerdown={(e) => startPaneDrag(e, node.id, label)}
         >
           <span
@@ -448,6 +463,11 @@
           {#if st}
             <span class="pane-id-meta muted">{st}</span>
           {/if}
+          {#if zoomForPane(node.id, "term") !== 1}
+            <span class="pane-zoom-badge muted"
+              >{Math.round(zoomForPane(node.id, "term") * 100)}%</span
+            >
+          {/if}
           <span class="drag-hint muted" aria-hidden="true">⋮⋮</span>
         </div>
         {#key node.sessionId + node.id}
@@ -456,6 +476,7 @@
             sessionName={sessionName(node.sessionId)}
             variant="embedded"
             bare={true}
+            zoomKey={paneZoomKey(node.id)}
           />
         {/key}
       {:else}
@@ -838,9 +859,25 @@
     background: #e35d6a;
   }
 
-  .chat-leaf > :global(.chat) {
+  .chat-zoom-host {
     flex: 1 1 auto;
     min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    /* Chromium/WebView — scales chat text + bubbles independently of app zoom */
+    zoom: var(--pane-zoom, 1);
+  }
+
+  .chat-zoom-host > :global(.chat) {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .pane-zoom-badge {
+    font-size: 0.65rem;
+    flex-shrink: 0;
   }
 
   .term-leaf {

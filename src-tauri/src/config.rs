@@ -66,6 +66,12 @@ fn default_bindings() -> HashMap<String, String> {
         ("openSessionInNewPane7".into(), "Alt+Shift+7".into()),
         ("openSessionInNewPane8".into(), "Alt+Shift+8".into()),
         ("openSessionInNewPane9".into(), "Alt+Shift+9".into()),
+        ("zoomPaneIn".into(), "Ctrl+Equal".into()),
+        ("zoomPaneOut".into(), "Ctrl+Minus".into()),
+        ("zoomPaneReset".into(), "Ctrl+0".into()),
+        ("zoomAppIn".into(), "Ctrl+Shift+Equal".into()),
+        ("zoomAppOut".into(), "Ctrl+Shift+Minus".into()),
+        ("zoomAppReset".into(), "Ctrl+Shift+0".into()),
     ])
 }
 
@@ -80,7 +86,7 @@ pub struct KeybindingsFile {
     pub scheme_version: u32,
 }
 
-const KEYBINDINGS_SCHEME_VERSION: u32 = 5;
+const KEYBINDINGS_SCHEME_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -178,7 +184,7 @@ fn should_migrate_scheme(file: &KeybindingsFile) -> bool {
 
 fn write_keybindings_file(path: &PathBuf, bindings: &HashMap<String, String>) -> Result<(), String> {
     let example = serde_json::json!({
-        "$comment": "Chatty keybindings (scheme v5). Alt = app chrome (works in TUI). Alt+Enter = new pane; Alt+Shift+Enter = replace pane; Alt+Shift+1–9 = open session N in new pane. Ctrl left for the shell. Avoids Linux DE chords (no Alt+` / Alt+Tab / Super). Delete this file to regenerate.",
+        "$comment": "Chatty keybindings (scheme v6). Alt = app chrome. Ctrl± = pane zoom; Ctrl+Shift± = app zoom. Alt+Enter = new pane + picker. Ctrl left for shell otherwise. Avoids Linux DE chords (no Alt+` / Alt+Tab / Super). Delete this file to regenerate.",
         "schemeVersion": KEYBINDINGS_SCHEME_VERSION,
         "bindings": bindings,
     });

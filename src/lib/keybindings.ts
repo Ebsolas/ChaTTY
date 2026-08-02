@@ -3,7 +3,7 @@
  *
  * Alt = ChaTTY chrome (works even inside a TUI).
  * Ctrl = guest shell/TUI (not intercepted while xterm focused), except
- *   Ctrl+Alt pane reorg chords which are host chrome.
+ *   Ctrl+Alt pane reorg and Ctrl± / Ctrl+Shift± zoom which are host chrome.
  * Super = window manager only (never bound).
  *
  * Override via ~/.config/chatty/keybindings.json
@@ -64,7 +64,13 @@ export type ActionId =
   | "openSessionInNewPane6"
   | "openSessionInNewPane7"
   | "openSessionInNewPane8"
-  | "openSessionInNewPane9";
+  | "openSessionInNewPane9"
+  | "zoomPaneIn"
+  | "zoomPaneOut"
+  | "zoomPaneReset"
+  | "zoomAppIn"
+  | "zoomAppOut"
+  | "zoomAppReset";
 
 export type KeybindingsMap = Record<ActionId, string>;
 
@@ -125,6 +131,12 @@ export const TERMINAL_ESCAPE_ACTIONS: ReadonlySet<ActionId> = new Set([
   "openSessionInNewPane7",
   "openSessionInNewPane8",
   "openSessionInNewPane9",
+  "zoomPaneIn",
+  "zoomPaneOut",
+  "zoomPaneReset",
+  "zoomAppIn",
+  "zoomAppOut",
+  "zoomAppReset",
   "nextSession",
   "prevSession",
   "focusGroups",
@@ -141,7 +153,7 @@ export const DEFAULT_BINDINGS: KeybindingsMap = {
   toggleTerminal: "Alt+T",
   focusComposer: "Alt+C",
   newSession: "Alt+N",
-  /** Always open selected session in a new pane (never rebind). */
+  /** New empty pane + session picker (never auto-fill sticky). */
   openInPane: "Alt+Enter",
   /** Replace focused term pane via session picker. */
   replacePaneSession: "Alt+Shift+Enter",
@@ -196,11 +208,19 @@ export const DEFAULT_BINDINGS: KeybindingsMap = {
   openSessionInNewPane7: "Alt+Shift+7",
   openSessionInNewPane8: "Alt+Shift+8",
   openSessionInNewPane9: "Alt+Shift+9",
+  /** Focused pane only (xterm font / chat scale). */
+  zoomPaneIn: "Ctrl+Equal",
+  zoomPaneOut: "Ctrl+Minus",
+  zoomPaneReset: "Ctrl+0",
+  /** Whole ChaTTY UI (CSS zoom on .app). */
+  zoomAppIn: "Ctrl+Shift+Equal",
+  zoomAppOut: "Ctrl+Shift+Minus",
+  zoomAppReset: "Ctrl+Shift+0",
 };
 
 export const ACTION_LABELS: Record<ActionId, string> = {
   toggleTerminal: "Toggle focused terminal",
-  openInPane: "Open session in new workspace pane",
+  openInPane: "New workspace pane (pick session)",
   replacePaneSession: "Replace focused pane session",
   closePane: "Close workspace pane (not session)",
   splitPaneVertical: "Split pane side-by-side",
@@ -254,6 +274,12 @@ export const ACTION_LABELS: Record<ActionId, string> = {
   openSessionInNewPane7: "Open session 7 in new pane",
   openSessionInNewPane8: "Open session 8 in new pane",
   openSessionInNewPane9: "Open session 9 in new pane",
+  zoomPaneIn: "Zoom focused pane in",
+  zoomPaneOut: "Zoom focused pane out",
+  zoomPaneReset: "Reset focused pane zoom",
+  zoomAppIn: "Zoom whole app in",
+  zoomAppOut: "Zoom whole app out",
+  zoomAppReset: "Reset whole app zoom",
 };
 
 const ACTION_IDS = Object.keys(DEFAULT_BINDINGS) as ActionId[];

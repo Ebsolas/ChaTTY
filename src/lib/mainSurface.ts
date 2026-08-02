@@ -212,6 +212,15 @@ export function setFocusedPane(id: string) {
   applyPaneDomFocus(id);
 }
 
+/** Zoom storage key for the focused workspace leaf (chat or term pane). */
+export function focusedPaneZoomKey(): string | null {
+  const w = get(workspace);
+  const node = findNode(w.root, w.focusedPaneId);
+  if (!node || node.kind === "split") return null;
+  if (node.kind === "chat") return "chat";
+  return `pane:${node.id}`;
+}
+
 /** Select the chat leaf (if any) and put typing in the composer. */
 export function focusChatPane() {
   const w = get(workspace);

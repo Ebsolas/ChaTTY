@@ -11,6 +11,12 @@
     sendRawToSession,
     subscribeRawOutput,
   } from "$lib/sessionBridge";
+  import {
+    getPaneZoom,
+    paneZooms,
+    sessionZoomKey,
+    termFontPx,
+  } from "$lib/zoom";
 
   interface Props {
     sessionId: string;
@@ -22,6 +28,10 @@
     variant?: "overlay" | "embedded";
     /** Hide title bar (workspace leaves are headerless). */
     bare?: boolean;
+    /**
+     * Zoom storage key (`pane:…` or `session:…`). Defaults to session key.
+     */
+    zoomKey?: string;
     onClose?: () => void;
   }
 
@@ -30,8 +40,12 @@
     sessionName,
     variant = "overlay",
     bare = false,
+    zoomKey = undefined,
     onClose,
   }: Props = $props();
+
+  const resolvedZoomKey = $derived(zoomKey ?? sessionZoomKey(sessionId));
+  const paneZoom = $derived($paneZooms[resolvedZoomKey] ?? 1);
 
   const sessionState = $derived($sessions.find((s) => s.id === sessionId));
   const modeLabel = $derived(
@@ -160,7 +174,9 @@
       term = new Terminal({
         cursorBlink: true,
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-        fontSize: 14,
+        fontSize: termFontPx(
+          getPaneZoom(zoomKey ?? sessionZoomKey(sessionId)),
+        ),
         lineHeight: 1.2,
         theme: {
           background: "#0d1017",
@@ -263,6 +279,21 @@
     ro?.disconnect();
     term?.dispose();
     term = undefined;
+  });
+
+  // Per-pane / per-session font zoom (Ctrl±); reflow PTY cells after change.
+  $effect(() => {
+    const z = paneZoom;
+    if (!term || !fit) return;
+    const px = termFontPx(z);
+    if (term.options.fontSize === px) return;
+    term.options.fontSize = px;
+    try {
+      fit.fit();
+    } catch {
+      /* ignore */
+    }
+    void pushSize();
   });
 
   async function pushSize() {

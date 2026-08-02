@@ -1,6 +1,6 @@
 {
-  "$comment": "Chatty keybindings (scheme v5). Alt = app chrome (works in TUI). Alt+Enter = new pane; Alt+Shift+Enter = replace pane; Alt+Shift+1–9 = open session N in new pane. Ctrl left for the shell (Ctrl+Alt = pane reorg). Avoids common Linux DE bindings: no Alt+` (GNOME same-app switcher), no Alt+Tab/F2/F4, no Super/Win (Niri/Hyprland). Delete this file to regenerate defaults.",
-  "schemeVersion": 5,
+  "$comment": "Chatty keybindings (scheme v6). Alt = app chrome. Ctrl± = focused pane zoom; Ctrl+Shift± = whole app zoom. Alt+Enter = new pane + picker. Ctrl left for shell otherwise (Ctrl+Alt = pane reorg). Avoids common Linux DE bindings.",
+  "schemeVersion": 6,
   "bindings": {
     "jumpPalette": "Alt+P",
     "toggleTerminal": "Alt+T",
@@ -48,6 +48,12 @@
     "openSessionInNewPane6": "Alt+Shift+6",
     "openSessionInNewPane7": "Alt+Shift+7",
     "openSessionInNewPane8": "Alt+Shift+8",
-    "openSessionInNewPane9": "Alt+Shift+9"
+    "openSessionInNewPane9": "Alt+Shift+9",
+    "zoomPaneIn": "Ctrl+Equal",
+    "zoomPaneOut": "Ctrl+Minus",
+    "zoomPaneReset": "Ctrl+0",
+    "zoomAppIn": "Ctrl+Shift+Equal",
+    "zoomAppOut": "Ctrl+Shift+Minus",
+    "zoomAppReset": "Ctrl+Shift+0"
   }
 }

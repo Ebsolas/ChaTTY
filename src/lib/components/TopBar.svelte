@@ -8,6 +8,13 @@
     toggleLeftRails,
     toggleSessionsRail,
   } from "$lib/chromeLayout";
+  import {
+    appZoom,
+    APP_ZOOM_STEP,
+    applyAppZoomCss,
+    nudgeAppZoom,
+    resetAppZoom,
+  } from "$lib/zoom";
 
   interface Props {
     booting?: boolean;
@@ -43,43 +50,10 @@
   let resultsOpen = $state(false);
   let dropPos = $state({ top: 0, left: 0, width: 0 });
 
-  const ZOOM_KEY = "chatty.uiZoom";
-  const ZOOM_MIN = 0.75;
-  const ZOOM_MAX = 1.5;
-  const ZOOM_STEP = 0.1;
-  const ZOOM_DEFAULT = 1;
-
-  let zoom = $state(loadZoom());
-
-  function loadZoom(): number {
-    try {
-      const raw = localStorage.getItem(ZOOM_KEY);
-      if (!raw) return ZOOM_DEFAULT;
-      const n = Number(raw);
-      if (!Number.isFinite(n)) return ZOOM_DEFAULT;
-      return clampZoom(n);
-    } catch {
-      return ZOOM_DEFAULT;
-    }
-  }
-
-  function clampZoom(n: number) {
-    return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(n * 100) / 100));
-  }
-
-  function applyZoom(n: number) {
-    zoom = clampZoom(n);
-    try {
-      localStorage.setItem(ZOOM_KEY, String(zoom));
-    } catch {
-      /* ignore */
-    }
-    const root = document.querySelector(".app") as HTMLElement | null;
-    if (root) root.style.zoom = String(zoom);
-  }
+  const zoom = $derived($appZoom);
 
   $effect(() => {
-    applyZoom(zoom);
+    applyAppZoomCss($appZoom);
   });
 
   const health = $derived(
@@ -260,13 +234,13 @@
   }
 
   function zoomIn() {
-    applyZoom(zoom + ZOOM_STEP);
+    nudgeAppZoom(APP_ZOOM_STEP);
   }
   function zoomOut() {
-    applyZoom(zoom - ZOOM_STEP);
+    nudgeAppZoom(-APP_ZOOM_STEP);
   }
   function zoomReset() {
-    applyZoom(ZOOM_DEFAULT);
+    resetAppZoom();
   }
 </script>
 
@@ -416,15 +390,20 @@
       {$chromeLayout.sessionsRailVisible ? "Hide" : "Show"} sessions rail
       <kbd class="menu-kbd">{chordFor("toggleSessionsRail")}</kbd>
     </button>
-    <div class="menu-section-label">Zoom · {Math.round(zoom * 100)}%</div>
+    <div class="menu-section-label">
+      App zoom · {Math.round(zoom * 100)}%
+    </div>
     <button type="button" class="menu-item" role="menuitem" onclick={zoomIn}>
       Zoom in
+      <kbd class="menu-kbd">Ctrl+Shift+=</kbd>
     </button>
     <button type="button" class="menu-item" role="menuitem" onclick={zoomOut}>
       Zoom out
+      <kbd class="menu-kbd">Ctrl+Shift+-</kbd>
     </button>
     <button type="button" class="menu-item" role="menuitem" onclick={zoomReset}>
       Reset zoom
+      <kbd class="menu-kbd">Ctrl+Shift+0</kbd>
     </button>
   </div>
 {/if}
