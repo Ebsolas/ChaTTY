@@ -3,11 +3,16 @@
   import type { Conversation, Group, SessionInfo } from "$lib/types";
   import { portal } from "$lib/portal";
   import type { JumpItem } from "$lib/components/JumpPalette.svelte";
+  import {
+    chromeLayout,
+    toggleLeftRails,
+    toggleSessionsRail,
+  } from "$lib/chromeLayout";
 
   interface Props {
     booting?: boolean;
     connected?: boolean;
-    /** Focus the palette field when this becomes true (Alt+P). */
+    /** Focus the palette field when this becomes true (Ctrl+P). */
     paletteOpen?: boolean;
     groups?: Group[];
     conversations?: Conversation[];
@@ -141,7 +146,7 @@
     }
   });
 
-  // Alt+P / jumpPaletteOpen → focus centered field (only on rising edge)
+  // Ctrl+P / jumpPaletteOpen → focus centered field (only on rising edge)
   let prevPaletteOpen = false;
   $effect(() => {
     const open = paletteOpen;
@@ -386,6 +391,31 @@
     style:right="{menuPos.right}px"
     onclick={(e) => e.stopPropagation()}
   >
+    <div class="menu-section-label">Layout</div>
+    <button
+      type="button"
+      class="menu-item"
+      role="menuitem"
+      onclick={() => {
+        toggleLeftRails();
+        closeMenu();
+      }}
+    >
+      {$chromeLayout.leftRailsVisible ? "Hide" : "Show"} left rails
+      <kbd class="menu-kbd">{chordFor("toggleLeftRails")}</kbd>
+    </button>
+    <button
+      type="button"
+      class="menu-item"
+      role="menuitem"
+      onclick={() => {
+        toggleSessionsRail();
+        closeMenu();
+      }}
+    >
+      {$chromeLayout.sessionsRailVisible ? "Hide" : "Show"} sessions rail
+      <kbd class="menu-kbd">{chordFor("toggleSessionsRail")}</kbd>
+    </button>
     <div class="menu-section-label">Zoom · {Math.round(zoom * 100)}%</div>
     <button type="button" class="menu-item" role="menuitem" onclick={zoomIn}>
       Zoom in
@@ -657,7 +687,10 @@
   }
 
   .menu-item {
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
     width: 100%;
     text-align: left;
     border: none;
@@ -672,5 +705,15 @@
 
   .menu-item:hover {
     background: color-mix(in srgb, var(--accent, #4c8dff) 16%, transparent);
+  }
+
+  .menu-kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.65rem;
+    color: var(--muted, #8b93a7);
+    border: 1px solid var(--border, #232833);
+    border-radius: 4px;
+    padding: 0.05rem 0.28rem;
+    flex-shrink: 0;
   }
 </style>

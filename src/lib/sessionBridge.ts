@@ -80,6 +80,7 @@ import {
   DEFAULT_GROUP,
   GROUP_DEFAULT_ID,
 } from "./types";
+import { onSessionRemovedFromSurface } from "./mainSurface";
 
 const unlistens: UnlistenFn[] = [];
 const storeUnsubs: Array<() => void> = [];
@@ -815,6 +816,7 @@ function forgetSessionLocally(sessionId: string) {
   termLineBuf.delete(sessionId);
   resetAltScreenCarry(sessionId);
   removeSession(sessionId);
+  onSessionRemovedFromSurface(sessionId);
 }
 
 /**

@@ -97,36 +97,48 @@ If `linuxdeploy` fails on Arch (gtk plugin path quirks), `npm run tauri:build` f
 - Composer injects lines; session typing creates chat turns (line mode; TUIs skipped).
 - Multi-session: add / remove / rename / reorder; `@session` targeting and sticky target.
 - **Groups → conversations → sessions** rails with drag reorder.
-- Busy / TUI indicators; open terminal with `Alt+`` / `Alt+1`–`9` / click.
+- Busy / TUI indicators; open focused terminal with `Ctrl+`` / `Alt+1`–`9` / context menu.
 - Cap: 16 concurrent shells. Chat history for closed sessions is kept.
 
 ### Keybindings
 
-Defaults use **Alt** as the in-app navigation modifier. Customize:
+Defaults (**scheme v5**): **Alt** = ChaTTY chrome (works even inside a TUI); **Ctrl** stays with the shell/vim (except **Ctrl+Alt** pane reorg).  
+**Super/Win is not used** (Niri/Hyprland). We also avoid common Linux DE chords such as **`Alt+\``** (GNOME/Ubuntu same-app window switcher), **Alt+Tab**, **Alt+F2/F4**, and **Alt+Space** (window menu on some DEs). Customize in `~/.config/chatty/keybindings.json`.
 
 ```bash
-# Created on first launch:
-~/.config/chatty/keybindings.json
-
 # Example in repo:
 config/keybindings.example.json
 ```
 
 | Action | Default |
 |--------|---------|
-| Toggle session terminal | `Alt+`` |
-| Session 1–9 | `Alt+1` … `Alt+9` |
+| Jump / palette | `Alt+P` |
+| Focus chat pane / composer | `Alt+C` |
 | New (focused rail) | `Alt+N` |
-| Close highlighted | `Alt+W` |
+| Toggle focused terminal | `Alt+T` |
+| Toggle left rails | `Alt+B` |
+| Toggle sessions rail | `Alt+Shift+S` |
+| Open selected session in **new** pane | `Alt+Enter` |
+| Open session 1–9 in **new** pane | `Alt+Shift+1` … `Alt+Shift+9` |
+| Replace focused pane session (picker) | `Alt+Shift+Enter` |
+| Close workspace **pane** (not session) | `Alt+Shift+W` |
 | Rename highlighted | `Alt+R` |
-| Focus composer | `Alt+C` |
-| Focus groups / conversations / sessions | `Alt+G` / `Alt+Shift+C` / `Alt+S` |
-| Jump palette | `Alt+P` |
+| Kill session (sessions rail focused) | `Delete` or rail × |
+| Focus pane | `Alt+←↑→↓` |
+| Resize pane | `Alt+Shift+arrows` |
+| Swap pane with neighbor | `Ctrl+Alt+arrows` |
+| Move pane toward neighbor | `Ctrl+Alt+Shift+arrows` |
+| Split right / down | `Alt+Shift+=` / `Alt+Shift+-` |
+| Session 1–9 (focused terminal overlay) | `Alt+1` … `Alt+9` |
 | Next / previous session | `Alt+]` / `Alt+[` |
 | Cycle focus region | `Tab` / `Shift+Tab` (rails + composer only) |
-| List up / down (in focused rail) | `↑` `↓` or `k` `j` |
+| List / picker up·down | `↑` `↓` (or `k` `j` in rails) |
 | Activate selection | `Enter` |
 | Back out layers | `Esc` |
+
+**Panes:** Open as many terminal panes as you want (`Alt+Enter` / `Alt+Shift+N` always insert; they never rebind an existing pane). **Alt+Shift+Enter** replaces the focused term via a session picker (Esc restores the previous session). Drag a pane’s title bar onto another pane: edges split that direction, center swaps. Resize freely with the splitters or `Alt+Shift+arrows`.
+
+Inside a terminal TUI, **Ctrl+C/L/W** go to the guest; use **Alt+…** for ChaTTY (e.g. `Alt+C` selects the chat pane and focuses the composer; `Alt+←/→` moves between workspace panes).
 
 **Rename**
 
@@ -151,7 +163,7 @@ Hierarchy: **Group → Conversation → Sessions + chat**.
 |--------|--------|----------------|
 | Switch | Click icon | Click row |
 | New | `+` under icons (seeds conversation + session) | `+` in header (seeds a session) |
-| Rename | Header title pencil / dblclick / monogram context / `Alt+R` | Pencil / context / `Alt+R` |
+| Rename | Header title pencil / dblclick / monogram context / `F2` | Pencil / context / `F2` |
 | Color | Context menu → Color… | — |
 | Reorder | Drag / Move up·down | Drag / Move up·down |
 | Delete | Context menu (kills nested sessions); last group reseeds **Home** | Context menu; last conversation reseeds **Main** |

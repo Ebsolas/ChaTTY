@@ -18,11 +18,16 @@
     expandedId?: string | null;
     canRemove?: boolean;
     creating?: boolean;
-    /** Session currently in rename mode (controlled from parent for Alt+R). */
+    /** Session currently in rename mode (controlled from parent for rename hotkey). */
     renameTargetId?: string | null;
-    /** Increment to open the profile picker (e.g. Alt+N from parent). */
+    /** Increment to open the profile picker (e.g. new-session hotkey from parent). */
     openCreateRequest?: number;
+    /** Focused full terminal (overlay). */
     onOpen?: (sessionId: string) => void;
+    /** Select / sticky only. */
+    onSelect?: (sessionId: string) => void;
+    /** Open as embedded pane on the main work surface. */
+    onOpenInPane?: (sessionId: string) => void;
     onHighlight?: (sessionId: string) => void;
     onFocusRegion?: () => void;
     /** Create a session; sshTarget required for SSH profiles. */
@@ -47,6 +52,8 @@
     renameTargetId = null,
     openCreateRequest = 0,
     onOpen,
+    onSelect,
+    onOpenInPane,
     onHighlight,
     onFocusRegion,
     onCreate,
@@ -118,11 +125,19 @@
     }
   });
 
-  // Hotkey focus moved to another rail/composer → dismiss the picker.
+  // Dismiss create picker only after the sessions rail *had* focus and then lost it.
+  // Do not close when opening via hotkey while composer/other region was focused
+  // (focused is still false on the first open frame).
+  let createPickerSawFocus = false;
   $effect(() => {
-    if (!focused && createOpen) {
+    if (focused) {
+      createPickerSawFocus = true;
+      return;
+    }
+    if (createPickerSawFocus && createOpen) {
       closeCreatePicker();
     }
+    if (!createOpen) createPickerSawFocus = false;
   });
 
   async function loadProfiles() {
@@ -179,9 +194,15 @@
         const h = el.offsetHeight || 200;
         createMenuPos = clampPopupPosition(r.right - w, r.bottom + 6, w, h);
       }
-      createMenuEl
-        ?.querySelector<HTMLButtonElement>(".profile-item.highlight")
-        ?.focus();
+      // Prefer menu focus so arrow keys work immediately (leave composer).
+      const item = createMenuEl?.querySelector<HTMLButtonElement>(
+        ".profile-item.highlight",
+      );
+      if (item) {
+        item.focus();
+      } else {
+        createMenuEl?.focus();
+      }
     });
   }
 
@@ -314,53 +335,109 @@
     await onCreate?.(profileId, t);
   }
 
-  function onCreateMenuKeydown(e: KeyboardEvent) {
-    if (!createOpen) return;
+  function focusHighlightedProfile() {
+    requestAnimationFrame(() => {
+      createMenuEl
+        ?.querySelector<HTMLButtonElement>(".profile-item.highlight")
+        ?.focus();
+    });
+  }
+
+  /** @returns true if the event was handled for the create menu */
+  function handleCreateMenuNav(e: KeyboardEvent): boolean {
+    if (!createOpen) return false;
+    if (e.altKey || e.metaKey || e.ctrlKey) return false;
 
     if (createStep === "ssh") {
+      // SSH step: let the input handle typing; only Esc here if not in field
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
         if (sshSuggestOpen && filteredSshRecents.length > 0) {
           sshSuggestOpen = false;
-          return;
+          return true;
         }
         createStep = "type";
         pendingProfileId = null;
         sshError = null;
-        requestAnimationFrame(() => {
-          createMenuEl
-            ?.querySelector<HTMLButtonElement>(".profile-item.highlight")
-            ?.focus();
-        });
-        return;
+        focusHighlightedProfile();
+        return true;
       }
-      return;
+      return false;
     }
 
-    if (profiles.length === 0) return;
-    if (e.key === "Escape") {
+    if (profiles.length === 0) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeCreatePicker();
+        return true;
+      }
+      return false;
+    }
+
+    const key = e.key;
+    const down = key === "ArrowDown" || key === "j" || key === "J";
+    const up = key === "ArrowUp" || key === "k" || key === "K";
+
+    if (key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
       closeCreatePicker();
-      return;
+      return true;
     }
-    if (e.key === "ArrowDown" || e.key === "j") {
+    if (down) {
       e.preventDefault();
+      e.stopPropagation();
       profileHighlight = (profileHighlight + 1) % profiles.length;
-      return;
+      focusHighlightedProfile();
+      return true;
     }
-    if (e.key === "ArrowUp" || e.key === "k") {
+    if (up) {
       e.preventDefault();
-      profileHighlight = (profileHighlight - 1 + profiles.length) % profiles.length;
-      return;
+      e.stopPropagation();
+      profileHighlight =
+        (profileHighlight - 1 + profiles.length) % profiles.length;
+      focusHighlightedProfile();
+      return true;
     }
-    if (e.key === "Enter") {
+    if (key === "Enter") {
       e.preventDefault();
+      e.stopPropagation();
       const p = profiles[profileHighlight];
       if (p) void pickProfile(p.id);
+      return true;
     }
+    if (key === "Home") {
+      e.preventDefault();
+      e.stopPropagation();
+      profileHighlight = 0;
+      focusHighlightedProfile();
+      return true;
+    }
+    if (key === "End") {
+      e.preventDefault();
+      e.stopPropagation();
+      profileHighlight = profiles.length - 1;
+      focusHighlightedProfile();
+      return true;
+    }
+    return false;
   }
+
+  function onCreateMenuKeydown(e: KeyboardEvent) {
+    handleCreateMenuNav(e);
+  }
+
+  // Capture while open so ↑↓/hjkl aren't stolen by rail list nav or composer history.
+  $effect(() => {
+    if (!createOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (handleCreateMenuNav(e)) return;
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  });
 
   function onSshInputKeydown(e: KeyboardEvent) {
     const list = filteredSshRecents;
@@ -634,7 +711,14 @@
                 tabindex="-1"
                 onclick={() => {
                   onHighlight?.(s.id);
+                  // Click opens focused terminal (select + sticky included in onOpen).
                   onOpen?.(s.id);
+                }}
+                ondblclick={(e) => {
+                  // Double-click prefers workspace pane over toggling overlay closed.
+                  e.preventDefault();
+                  onHighlight?.(s.id);
+                  onOpenInPane?.(s.id);
                 }}
               >
                 <span
@@ -671,6 +755,32 @@
                 </span>
               </button>
               <div class="row-actions">
+                <button
+                  type="button"
+                  class="icon-btn"
+                  tabindex="-1"
+                  title={`Open in new pane (${chordFor("openInPane")}${i < 9 ? ` · ${chordFor(`openSessionInNewPane${i + 1}` as "openSessionInNewPane1")}` : ""})`}
+                  aria-label={`Open @${s.name} in a new workspace pane`}
+                  onclick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onOpenInPane?.(s.id);
+                  }}
+                >
+                  <!-- panels -->
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <rect
+                      x="1.5"
+                      y="2.5"
+                      width="13"
+                      height="11"
+                      rx="1.5"
+                      stroke="currentColor"
+                      stroke-width="1.4"
+                    />
+                    <path d="M7 2.5v11" stroke="currentColor" stroke-width="1.4" />
+                  </svg>
+                </button>
                 <button
                   type="button"
                   class="icon-btn"
@@ -858,11 +968,23 @@
       class="ctx-item"
       role="menuitem"
       onclick={() => {
+        onOpenInPane?.(ms.id);
+        closeMenu();
+      }}
+    >
+      <span>Open in new pane</span>
+      <kbd>{chordFor("openInPane")}</kbd>
+    </button>
+    <button
+      type="button"
+      class="ctx-item"
+      role="menuitem"
+      onclick={() => {
         onOpen?.(ms.id);
         closeMenu();
       }}
     >
-      <span>Open terminal</span>
+      <span>Focused terminal</span>
       <kbd>{chordFor("toggleTerminal")}</kbd>
     </button>
     <button

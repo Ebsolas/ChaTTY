@@ -5,19 +5,47 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// Default in-app keybindings (Alt = navigation).
+/// Default in-app keybindings — keep in sync with `src/lib/keybindings.ts`.
+/// Scheme v5: flexible panes (always-new open, replace picker, reorg).
+/// Alt = ChaTTY chrome; Ctrl left for guest shell; no Super.
+/// Avoid Linux DE defaults: Alt+` (GNOME same-app switcher), Alt+Tab/F2/F4, Super/*.
 fn default_bindings() -> HashMap<String, String> {
     HashMap::from([
-        ("toggleTerminal".into(), "Alt+Backquote".into()),
+        ("jumpPalette".into(), "Alt+P".into()),
+        ("toggleTerminal".into(), "Alt+T".into()),
+        ("focusComposer".into(), "Alt+C".into()),
         ("newSession".into(), "Alt+N".into()),
-        ("closeSession".into(), "Alt+W".into()),
+        ("openInPane".into(), "Alt+Enter".into()),
+        ("replacePaneSession".into(), "Alt+Shift+Enter".into()),
+        ("closePane".into(), "Alt+Shift+W".into()),
+        ("toggleLeftRails".into(), "Alt+B".into()),
+        ("toggleSessionsRail".into(), "Alt+Shift+S".into()),
         ("renameSession".into(), "Alt+R".into()),
         ("renameItem".into(), "Alt+R".into()),
-        ("focusComposer".into(), "Alt+C".into()),
         ("focusGroups".into(), "Alt+G".into()),
         ("focusConversations".into(), "Alt+Shift+C".into()),
         ("focusSessions".into(), "Alt+S".into()),
-        ("jumpPalette".into(), "Alt+P".into()),
+        ("focusPaneLeft".into(), "Alt+ArrowLeft".into()),
+        ("focusPaneRight".into(), "Alt+ArrowRight".into()),
+        ("focusPaneUp".into(), "Alt+ArrowUp".into()),
+        ("focusPaneDown".into(), "Alt+ArrowDown".into()),
+        ("resizePaneLeft".into(), "Alt+Shift+ArrowLeft".into()),
+        ("resizePaneRight".into(), "Alt+Shift+ArrowRight".into()),
+        ("resizePaneUp".into(), "Alt+Shift+ArrowUp".into()),
+        ("resizePaneDown".into(), "Alt+Shift+ArrowDown".into()),
+        ("swapPaneLeft".into(), "Ctrl+Alt+ArrowLeft".into()),
+        ("swapPaneRight".into(), "Ctrl+Alt+ArrowRight".into()),
+        ("swapPaneUp".into(), "Ctrl+Alt+ArrowUp".into()),
+        ("swapPaneDown".into(), "Ctrl+Alt+ArrowDown".into()),
+        ("movePaneLeft".into(), "Ctrl+Alt+Shift+ArrowLeft".into()),
+        ("movePaneRight".into(), "Ctrl+Alt+Shift+ArrowRight".into()),
+        ("movePaneUp".into(), "Ctrl+Alt+Shift+ArrowUp".into()),
+        ("movePaneDown".into(), "Ctrl+Alt+Shift+ArrowDown".into()),
+        ("splitPaneVertical".into(), "Alt+Shift+Equal".into()),
+        ("splitPaneHorizontal".into(), "Alt+Shift+Minus".into()),
+        ("focusNextPane".into(), "Alt+O".into()),
+        ("focusPrevPane".into(), "Alt+Shift+O".into()),
+        ("closeSession".into(), "Delete".into()),
         ("nextSession".into(), "Alt+BracketRight".into()),
         ("prevSession".into(), "Alt+BracketLeft".into()),
         ("session1".into(), "Alt+1".into()),
@@ -29,6 +57,15 @@ fn default_bindings() -> HashMap<String, String> {
         ("session7".into(), "Alt+7".into()),
         ("session8".into(), "Alt+8".into()),
         ("session9".into(), "Alt+9".into()),
+        ("openSessionInNewPane1".into(), "Alt+Shift+1".into()),
+        ("openSessionInNewPane2".into(), "Alt+Shift+2".into()),
+        ("openSessionInNewPane3".into(), "Alt+Shift+3".into()),
+        ("openSessionInNewPane4".into(), "Alt+Shift+4".into()),
+        ("openSessionInNewPane5".into(), "Alt+Shift+5".into()),
+        ("openSessionInNewPane6".into(), "Alt+Shift+6".into()),
+        ("openSessionInNewPane7".into(), "Alt+Shift+7".into()),
+        ("openSessionInNewPane8".into(), "Alt+Shift+8".into()),
+        ("openSessionInNewPane9".into(), "Alt+Shift+9".into()),
     ])
 }
 
@@ -39,7 +76,11 @@ pub struct KeybindingsFile {
     pub comment: Option<String>,
     #[serde(default)]
     pub bindings: HashMap<String, String>,
+    #[serde(default)]
+    pub scheme_version: u32,
 }
+
+const KEYBINDINGS_SCHEME_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,8 +118,7 @@ pub fn ensure_tmux_conf() -> Result<PathBuf, String> {
     let dir = config_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
     let path = tmux_conf_path();
-    // Always rewrite so upgrades pick up defaults (user can edit after; we only
-    // create if missing to avoid clobbering customizations).
+    // Only create if missing to avoid clobbering customizations.
     if !path.is_file() {
         let conf = r#"# Chatty host-local tmux config (not used on SSH remotes).
 # Outer PTY clients load this via `tmux -f …`.
@@ -97,6 +137,56 @@ set -g focus-events on
     Ok(path)
 }
 
+/// Migrate auto-seeded scheme v1–v4 files to v5 (pane open/replace/reorg keys).
+fn should_migrate_scheme(file: &KeybindingsFile) -> bool {
+    if file.scheme_version >= KEYBINDINGS_SCHEME_VERSION {
+        return false;
+    }
+    // Any prior scheme version we shipped as a seed — refresh defaults.
+    if file.scheme_version > 0 && file.scheme_version < KEYBINDINGS_SCHEME_VERSION {
+        return true;
+    }
+    // Known stock values from v1–v4
+    let tt = file.bindings.get("toggleTerminal").map(|s| s.as_str());
+    let fc = file.bindings.get("focusComposer").map(|s| s.as_str());
+    if matches!(
+        tt,
+        Some("Alt+Backquote") | Some("Alt+`") | Some("Ctrl+Backquote")
+    ) {
+        return true;
+    }
+    if matches!(fc, Some("Ctrl+L") | Some("Alt+Space")) {
+        return true;
+    }
+    if matches!(
+        file.bindings.get("toggleLeftRails").map(|s| s.as_str()),
+        Some("Ctrl+B")
+    ) {
+        return true;
+    }
+    // v4 stock without replacePaneSession
+    if !file.bindings.contains_key("replacePaneSession")
+        && matches!(
+            file.bindings.get("openInPane").map(|s| s.as_str()),
+            Some("Alt+Enter")
+        )
+    {
+        return true;
+    }
+    false
+}
+
+fn write_keybindings_file(path: &PathBuf, bindings: &HashMap<String, String>) -> Result<(), String> {
+    let example = serde_json::json!({
+        "$comment": "Chatty keybindings (scheme v5). Alt = app chrome (works in TUI). Alt+Enter = new pane; Alt+Shift+Enter = replace pane; Alt+Shift+1–9 = open session N in new pane. Ctrl left for the shell. Avoids Linux DE chords (no Alt+` / Alt+Tab / Super). Delete this file to regenerate.",
+        "schemeVersion": KEYBINDINGS_SCHEME_VERSION,
+        "bindings": bindings,
+    });
+    let text = serde_json::to_string_pretty(&example)
+        .map_err(|e| format!("serialize keybindings: {e}"))?;
+    fs::write(path, text + "\n").map_err(|e| format!("write keybindings: {e}"))
+}
+
 pub fn load_keybindings() -> KeybindingsPayload {
     let dir = config_dir();
     let path = keybindings_path();
@@ -107,12 +197,17 @@ pub fn load_keybindings() -> KeybindingsPayload {
         match fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str::<KeybindingsFile>(&text) {
                 Ok(file) => {
-                    for (k, v) in file.bindings {
-                        if !v.trim().is_empty() {
-                            bindings.insert(k, v);
+                    if should_migrate_scheme(&file) {
+                        let _ = write_keybindings_file(&path, &default_bindings());
+                        source_path = Some(path.display().to_string());
+                    } else {
+                        for (k, v) in file.bindings {
+                            if !v.trim().is_empty() {
+                                bindings.insert(k, v);
+                            }
                         }
+                        source_path = Some(path.display().to_string());
                     }
-                    source_path = Some(path.display().to_string());
                 }
                 Err(e) => {
                     eprintln!("chatty: invalid keybindings.json: {e}");
@@ -139,13 +234,7 @@ pub fn ensure_keybindings_example() -> Result<String, String> {
     if path.exists() {
         return Ok(path.display().to_string());
     }
-    let example = serde_json::json!({
-        "$comment": "Chatty keybindings. Alt is the default navigation modifier. Delete keys to fall back to built-in defaults after restart.",
-        "bindings": default_bindings(),
-    });
-    let text = serde_json::to_string_pretty(&example)
-        .map_err(|e| format!("serialize example: {e}"))?;
-    fs::write(&path, text + "\n").map_err(|e| format!("write keybindings: {e}"))?;
+    write_keybindings_file(&path, &default_bindings())?;
     Ok(path.display().to_string())
 }
 

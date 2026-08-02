@@ -4,15 +4,33 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import BusyIndicator from "$lib/components/BusyIndicator.svelte";
-  import ChatView from "$lib/components/ChatView.svelte";
   import Composer from "$lib/components/Composer.svelte";
   import ConversationsRail from "$lib/components/ConversationsRail.svelte";
   import GroupsRail from "$lib/components/GroupsRail.svelte";
   import type { JumpItem } from "$lib/components/JumpPalette.svelte";
+  import MainSurface from "$lib/components/MainSurface.svelte";
   import SessionsRail from "$lib/components/SessionsRail.svelte";
   import SessionTerminal from "$lib/components/SessionTerminal.svelte";
   import ToastStack from "$lib/components/ToastStack.svelte";
   import TopBar from "$lib/components/TopBar.svelte";
+  import {
+    chromeLayout,
+    toggleLeftRails,
+    toggleSessionsRail,
+  } from "$lib/chromeLayout";
+  import {
+    beginReplaceFocusedPane,
+    closePane,
+    focusChatPane,
+    focusNextPane,
+    focusPaneDirection,
+    movePaneDirection,
+    openSessionInNewPane,
+    resizePaneDirection,
+    splitFocused,
+    swapWithNeighbor,
+    termPaneSessionId,
+  } from "$lib/mainSurface";
   import {
     cycleFocusRegion,
     focusRegion,
@@ -24,7 +42,12 @@
     selectedSessionId,
     setFocusRegion,
   } from "$lib/focus";
-  import { matchAction, type ActionId } from "$lib/keybindings";
+  import {
+    isXtermTarget,
+    matchAction,
+    TERMINAL_ESCAPE_ACTIONS,
+    type ActionId,
+  } from "$lib/keybindings";
   import {
     railWidths,
     railWidthsStyle,
@@ -277,18 +300,35 @@
 
       const bindings = get(keybindings);
       const action = matchAction(e, bindings);
+      const inXterm = isXtermTarget(e.target);
 
       if (action) {
+        // Inside a guest TUI/shell: only escape-set actions (don't steal Ctrl+W from vim).
+        if (inXterm && !TERMINAL_ESCAPE_ACTIONS.has(action)) {
+          return;
+        }
+        // Typing in composer/inputs: bare letter keys go to the field;
+        // Alt/Ctrl chords always run app actions (new session, palette, …).
         if (
           inField &&
+          !inXterm &&
           !e.altKey &&
           !e.metaKey &&
+          !e.ctrlKey &&
           action !== "focusComposer" &&
           action !== "jumpPalette" &&
+          action !== "newSession" &&
+          action !== "openInPane" &&
+          action !== "replacePaneSession" &&
           action !== "focusGroups" &&
           action !== "focusConversations" &&
-          action !== "focusSessions"
+          action !== "focusSessions" &&
+          !action.startsWith("openSessionInNewPane")
         ) {
+          return;
+        }
+        // Delete = kill session only when sessions rail is focused.
+        if (action === "closeSession" && region !== "sessions") {
           return;
         }
         e.preventDefault();
@@ -297,9 +337,15 @@
         return;
       }
 
+      // Don't steal ↑↓/hjkl from session-type picker or workspace session picker.
+      const createMenuOpen = !!document.querySelector("[data-chatty-create-menu]");
+      const sessionPickerOpen = !!document.querySelector(".session-picker");
+
       // List navigation when a rail is focused and not typing
       if (
         !paletteOpen &&
+        !createMenuOpen &&
+        !sessionPickerOpen &&
         !inField &&
         !get(expandedSessionId) &&
         (region === "groups" ||
@@ -348,12 +394,15 @@
     region: "groups" | "conversations" | "sessions",
   ): boolean {
     const key = e.key;
+    // Vim-style + arrows (no modifiers) when a rail has focus.
     const down =
       key === "ArrowDown" || key === "j" || key === "J";
     const up = key === "ArrowUp" || key === "k" || key === "K";
-    const home = key === "Home";
-    const end = key === "End";
+    const home = key === "Home" || key === "g";
+    // G for end is shift+g in vim; accept both End and G
+    const end = key === "End" || key === "G";
     const enter = key === "Enter";
+    // h/l reserved for future horizontal nav; ignore alone so they don't no-op oddly
     if (!down && !up && !home && !end && !enter) return false;
     if (e.altKey || e.metaKey || e.ctrlKey) return false;
 
@@ -405,9 +454,9 @@
       if (enter) {
         const id = list[idx]?.id;
         if (id) {
-          activeSessionId.set(id);
-          stickySessionId.set(id);
-          selectedSessionId.set(id);
+          // Enter = open focused terminal view (not only sticky).
+          // hjkl/arrows already move selection; Enter activates like a file manager.
+          handleOpenSession(id);
         }
         return true;
       }
@@ -437,6 +486,111 @@
         if (id) openExpandedSession(id);
         return;
       }
+      case "openInPane": {
+        // Always new pane — never rebind an existing term leaf.
+        const id =
+          get(selectedSessionId) ??
+          get(activeSessionId) ??
+          get(stickySessionId) ??
+          get(activeSessions)[0]?.id ??
+          null;
+        if (id) {
+          activeSessionId.set(id);
+          stickySessionId.set(id);
+          openSessionInNewPane(id);
+        } else {
+          splitFocused("col", { sessionId: null, newKind: "term" });
+        }
+        return;
+      }
+      case "replacePaneSession": {
+        // Replace focused term via picker (MainSurface tracks Esc restore).
+        beginReplaceFocusedPane();
+        return;
+      }
+      case "closePane":
+        closePane();
+        return;
+      case "splitPaneVertical":
+        splitFocused("col", {
+          sessionId:
+            get(selectedSessionId) ??
+            get(activeSessionId) ??
+            get(stickySessionId) ??
+            null,
+          newKind: "term",
+        });
+        return;
+      case "splitPaneHorizontal":
+        splitFocused("row", {
+          sessionId:
+            get(selectedSessionId) ??
+            get(activeSessionId) ??
+            get(stickySessionId) ??
+            null,
+          newKind: "term",
+        });
+        return;
+      case "focusPaneLeft":
+        focusPaneDirection("left");
+        return;
+      case "focusPaneRight":
+        focusPaneDirection("right");
+        return;
+      case "focusPaneUp":
+        focusPaneDirection("up");
+        return;
+      case "focusPaneDown":
+        focusPaneDirection("down");
+        return;
+      case "resizePaneLeft":
+        resizePaneDirection("left");
+        return;
+      case "resizePaneRight":
+        resizePaneDirection("right");
+        return;
+      case "resizePaneUp":
+        resizePaneDirection("up");
+        return;
+      case "resizePaneDown":
+        resizePaneDirection("down");
+        return;
+      case "swapPaneLeft":
+        swapWithNeighbor("left");
+        return;
+      case "swapPaneRight":
+        swapWithNeighbor("right");
+        return;
+      case "swapPaneUp":
+        swapWithNeighbor("up");
+        return;
+      case "swapPaneDown":
+        swapWithNeighbor("down");
+        return;
+      case "movePaneLeft":
+        movePaneDirection("left");
+        return;
+      case "movePaneRight":
+        movePaneDirection("right");
+        return;
+      case "movePaneUp":
+        movePaneDirection("up");
+        return;
+      case "movePaneDown":
+        movePaneDirection("down");
+        return;
+      case "focusNextPane":
+        focusNextPane(1);
+        return;
+      case "focusPrevPane":
+        focusNextPane(-1);
+        return;
+      case "toggleLeftRails":
+        toggleLeftRails();
+        return;
+      case "toggleSessionsRail":
+        toggleSessionsRail();
+        return;
       case "newSession":
         await handleFocusAwareNew();
         return;
@@ -461,7 +615,9 @@
         setFocusRegion("sessions");
         return;
       case "focusComposer":
+        // Chat pane + composer are tied: select chat leaf, typing goes to composer.
         closeExpandedSession();
+        focusChatPane();
         setFocusRegion("composer");
         return;
       case "nextSession":
@@ -490,6 +646,24 @@
         else openExpandedSession(target.id);
         return;
       }
+      case "openSessionInNewPane1":
+      case "openSessionInNewPane2":
+      case "openSessionInNewPane3":
+      case "openSessionInNewPane4":
+      case "openSessionInNewPane5":
+      case "openSessionInNewPane6":
+      case "openSessionInNewPane7":
+      case "openSessionInNewPane8":
+      case "openSessionInNewPane9": {
+        const n = Number(action.replace("openSessionInNewPane", ""));
+        const target = get(activeSessions)[n - 1];
+        if (!target) return;
+        activeSessionId.set(target.id);
+        stickySessionId.set(target.id);
+        // Always insert a new pane — never replace.
+        openSessionInNewPane(target.id);
+        return;
+      }
     }
   }
 
@@ -515,6 +689,17 @@
     }
   }
 
+  function handleSelectSession(id: string) {
+    selectedSessionId.set(id);
+    activeSessionId.set(id);
+    stickySessionId.set(id);
+  }
+
+  function handleOpenInPane(id: string) {
+    handleSelectSession(id);
+    openSessionInNewPane(id);
+  }
+
   function handleOpenSession(id: string) {
     // Stuck state: expanded id set but session missing → clear and open.
     const list = get(sessions);
@@ -522,6 +707,7 @@
       closeExpandedSession();
       return;
     }
+    handleSelectSession(id);
     if (get(expandedSessionId) === id) {
       closeExpandedSession();
       return;
@@ -594,11 +780,17 @@
     }
   }
 
-  /** Bump to open the session-type picker in SessionsRail (+ / Alt+N). */
+  /** Bump to open the session-type picker in SessionsRail (+ / new-session hotkey). */
   let sessionCreateRequest = $state(0);
 
   function handleCreateSession() {
     if (creatingSession) return;
+    // Leave composer/xterm so the profile menu can take focus.
+    try {
+      (document.activeElement as HTMLElement | null)?.blur?.();
+    } catch {
+      /* ignore */
+    }
     setFocusRegion("sessions");
     sessionCreateRequest += 1;
   }
@@ -756,7 +948,26 @@
       null,
   );
 
-  const showBusyBar = $derived(busySessions.length > 0 && !$expandedSessionId);
+  // Busy bar only when neither focused overlay nor a term pane is showing that work.
+  const showBusyBar = $derived(
+    busySessions.length > 0 &&
+      !$expandedSessionId &&
+      !(
+        $termPaneSessionId &&
+        busySessions.some((s) => s.id === $termPaneSessionId)
+      ),
+  );
+
+  const convoTitle = $derived(
+    $conversations.find((c) => c.id === $activeConversationId)?.name ?? "Main",
+  );
+  const sessionCountLabel = $derived(
+    $activeSessions.length === 0
+      ? ""
+      : $activeSessions.length === 1
+        ? `· 1 session`
+        : `· ${$activeSessions.length} sessions`,
+  );
 
   const busyExtra = $derived(
     Math.max(0, busySessions.length - (busySession ? 1 : 0)),
@@ -772,6 +983,8 @@
 <div
   class="app"
   class:resizing={!!resizing}
+  class:hide-left-rails={!$chromeLayout.leftRailsVisible}
+  class:hide-sessions-rail={!$chromeLayout.sessionsRailVisible}
   tabindex="-1"
   style={railWidthsStyle($railWidths)}
 >
@@ -894,37 +1107,20 @@
     ></div>
 
     <section class="chat-pane">
-      <div class="pane-header">
-        <span class="convo-name">
-          {$conversations.find((c) => c.id === $activeConversationId)?.name ??
-            "Main"}
-          {#if $activeSessions.length > 1}
-            <span class="muted-count">· {$activeSessions.length} sessions</span>
-          {:else if activeSession}
-            <span class="muted-count">· @{activeSession.name}</span>
-          {/if}
-        </span>
-        <span class="badge">mvp2</span>
-        {#if activeSession}
-          <button
-            type="button"
-            class="session-hint mono open-session"
-            title={`Open session terminal (${chordFor("toggleTerminal")})`}
-            onclick={() => handleOpenSession(activeSession.id)}
-          >
-            @{activeSession.name}
-            <span class="hint-key">{chordFor("toggleTerminal")}</span>
-          </button>
-        {/if}
-      </div>
-
       {#if bootError || $backendError}
         <div class="error mono">{bootError ?? $backendError}</div>
       {/if}
 
       <div class="chat-body">
         {#key $activeConversationId}
-          <ChatView messages={$activeMessages} onOpenSession={handleOpenSession} />
+          <MainSurface
+            messages={$activeMessages}
+            sessions={$sessions}
+            activeSessions={$activeSessions}
+            conversationTitle={convoTitle}
+            sessionCountLabel={sessionCountLabel}
+            onOpenSession={handleOpenSession}
+          />
         {/key}
         <ToastStack />
       </div>
@@ -936,14 +1132,18 @@
             ? `${busyCommand ?? ""}${busyCommand ? " · " : ""}+${busyExtra} more`
             : busyCommand}
           mode="busy"
-          onOpen={() => handleOpenSession(busySession.id)}
+          onOpen={() => handleOpenInPane(busySession.id)}
         />
       {/if}
 
-      <!-- Absolute over chat-pane only — no grid reflow / slide animation -->
+      <!-- Focused single-session terminal — unchanged overlay path -->
       {#if expandedSession}
         {#key expandedSession.id}
-          <SessionTerminal sessionId={expandedSession.id} sessionName={expandedSession.name} />
+          <SessionTerminal
+            sessionId={expandedSession.id}
+            sessionName={expandedSession.name}
+            variant="overlay"
+          />
         {/key}
       {/if}
     </section>
@@ -960,6 +1160,8 @@
         openCreateRequest={sessionCreateRequest}
         canRemove={true}
         onOpen={handleOpenSession}
+        onSelect={handleSelectSession}
+        onOpenInPane={handleOpenInPane}
         onHighlight={(id) => selectedSessionId.set(id)}
         onFocusRegion={() => setFocusRegion("sessions")}
         onCreate={handleCreateSessionWithProfile}
@@ -1023,6 +1225,48 @@
 
   .app.resizing * {
     cursor: col-resize !important;
+  }
+
+  /* Phase 0: collapse chrome rails (independent toggles) */
+  .app.hide-left-rails {
+    grid-template-columns:
+      0
+      0
+      0
+      minmax(0, 1fr)
+      5px
+      var(--w-sessions);
+  }
+
+  .app.hide-left-rails .rail-host-groups,
+  .app.hide-left-rails .rail-host-convos,
+  .app.hide-left-rails .rail-resizer[data-edge="right"] {
+    display: none;
+  }
+
+  .app.hide-sessions-rail {
+    grid-template-columns:
+      var(--w-groups)
+      var(--w-convos)
+      5px
+      minmax(0, 1fr)
+      0
+      0;
+  }
+
+  .app.hide-sessions-rail .rail-host-sessions,
+  .app.hide-sessions-rail .rail-resizer[data-edge="left"] {
+    display: none;
+  }
+
+  .app.hide-left-rails.hide-sessions-rail {
+    grid-template-columns:
+      0
+      0
+      0
+      minmax(0, 1fr)
+      0
+      0;
   }
 
   .rail-resizer {
@@ -1112,8 +1356,8 @@
     background: var(--bg, #0f1115);
   }
 
-  /* Terminal fills chat-pane only (position:absolute on .overlay itself) */
-  .chat-pane > :global(.overlay) {
+  /* Focused terminal covers entire main view (header + workspace) */
+  .chat-pane > :global(.term-shell.overlay) {
     z-index: 30;
   }
 
@@ -1131,70 +1375,6 @@
     flex-direction: column;
     overflow: hidden;
     background: var(--bg, #0f1115);
-  }
-
-  .pane-header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.75rem 1rem;
-    border-bottom: 1px solid var(--border, #232833);
-    font-size: 0.9rem;
-    color: var(--muted, #8b93a7);
-    flex-shrink: 0;
-  }
-
-  .convo-name {
-    color: var(--text, #e8eaed);
-    font-weight: 600;
-  }
-
-  .muted-count {
-    font-weight: 500;
-    color: var(--muted, #8b93a7);
-    font-size: 0.85em;
-  }
-
-  .badge {
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0.15rem 0.4rem;
-    border-radius: 999px;
-    background: var(--accent-soft, #2a4a86);
-    color: #cfe0ff;
-  }
-
-  .session-hint {
-    margin-left: auto;
-    font-size: 0.78rem;
-  }
-
-  .open-session {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--muted, #8b93a7);
-    font: inherit;
-    cursor: pointer;
-    padding: 0.2rem 0.45rem;
-    border-radius: 6px;
-  }
-
-  .open-session:hover {
-    color: var(--text, #e8eaed);
-    border-color: var(--border, #232833);
-    background: var(--bg-elevated, #161a22);
-  }
-
-  .hint-key {
-    font-size: 0.68rem;
-    opacity: 0.7;
-    padding: 0.05rem 0.3rem;
-    border-radius: 4px;
-    border: 1px solid var(--border, #232833);
   }
 
   .mono {

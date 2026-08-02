@@ -15,9 +15,23 @@
   interface Props {
     sessionId: string;
     sessionName: string;
+    /**
+     * overlay — focused full-pane terminal (Esc closes expanded view).
+     * embedded — work-surface pane leaf (Esc does not close; parent owns chrome).
+     */
+    variant?: "overlay" | "embedded";
+    /** Hide title bar (workspace leaves are headerless). */
+    bare?: boolean;
+    onClose?: () => void;
   }
 
-  let { sessionId, sessionName }: Props = $props();
+  let {
+    sessionId,
+    sessionName,
+    variant = "overlay",
+    bare = false,
+    onClose,
+  }: Props = $props();
 
   const sessionState = $derived($sessions.find((s) => s.id === sessionId));
   const modeLabel = $derived(
@@ -229,10 +243,10 @@
     });
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        closeExpandedSession();
-      }
+      if (e.key !== "Escape") return;
+      if (variant !== "overlay") return;
+      e.preventDefault();
+      closeExpandedSession();
     };
     window.addEventListener("keydown", onKey, true);
 
@@ -266,42 +280,82 @@
   }
 </script>
 
-<div class="overlay" role="dialog" aria-label={`Session terminal @${sessionName}`}>
-  <header class="bar">
-    <div class="left">
-      <span class="mono">@{sessionName}</span>
-      <span
-        class="muted"
-        class:tui={sessionState?.activity === "tui" || sessionState?.tuiActive}
-        class:busy={sessionState?.activity === "busy"}
-      >
-        {modeLabel}
-      </span>
-    </div>
-    <div class="right">
-      <span class="hint">
-        {sessionState?.activity === "tui" || sessionState?.tuiActive
-          ? "Full-screen app · Esc closes view"
-          : "Lines appear in chat · Esc closes view"}
-      </span>
-      <button type="button" class="close" onclick={() => closeExpandedSession()}>Close</button>
-    </div>
-  </header>
+<div
+  class="term-shell"
+  class:overlay={variant === "overlay"}
+  class:embedded={variant === "embedded"}
+  class:bare
+  role={variant === "overlay" ? "dialog" : "region"}
+  aria-label={`Session terminal @${sessionName}`}
+>
+  {#if !bare}
+    <header class="bar">
+      <div class="left">
+        <span class="mono">@{sessionName}</span>
+        <span
+          class="muted"
+          class:tui={sessionState?.activity === "tui" || sessionState?.tuiActive}
+          class:busy={sessionState?.activity === "busy"}
+        >
+          {modeLabel}
+        </span>
+      </div>
+      <div class="right">
+        <span class="hint">
+          {#if variant === "embedded"}
+            {sessionState?.activity === "tui" || sessionState?.tuiActive
+              ? "Pane · TUI · close pane keeps session"
+              : "Pane · lines still appear in chat"}
+          {:else if sessionState?.activity === "tui" || sessionState?.tuiActive}
+            Full-screen app · Esc closes view
+          {:else}
+            Lines appear in chat · Esc closes view
+          {/if}
+        </span>
+        <button
+          type="button"
+          class="close"
+          onclick={() => {
+            if (variant === "embedded") onClose?.();
+            else closeExpandedSession();
+          }}
+        >
+          Close
+        </button>
+      </div>
+    </header>
+  {/if}
   <div class="term-host" bind:this={host}></div>
 </div>
 
 <style>
-  .overlay {
-    /* Cover chat-pane only — no grid participation, no reflow/slide. */
-    position: absolute;
-    inset: 0;
-    z-index: 30;
+  .term-shell {
     display: flex;
     flex-direction: column;
     min-height: 0;
     min-width: 0;
     background: #0d1017;
     border: none;
+  }
+
+  .term-shell.overlay {
+    /* Cover chat-pane only — focused single-session path. */
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+  }
+
+  .term-shell.embedded {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    height: auto;
+    border-left: none;
+  }
+
+  .term-shell.bare .term-host {
+    padding: 0.2rem;
   }
 
   .bar {

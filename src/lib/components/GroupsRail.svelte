@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Group, SessionInfo, Conversation } from "$lib/types";
   import { GROUP_COLORS, groupMonogram } from "$lib/types";
+  import { chordFor } from "$lib/stores";
   import { portal } from "$lib/portal";
 
   interface Props {
@@ -229,7 +230,7 @@
     type="button"
     class="add-btn"
     tabindex="-1"
-    title="New group (Alt+N when groups focused)"
+    title={`New group (${chordFor("newSession")} when groups focused)`}
     disabled={creating}
     onclick={() => onCreate?.()}
   >

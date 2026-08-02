@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Conversation, SessionInfo } from "$lib/types";
+  import { chordFor } from "$lib/stores";
   import { portal } from "$lib/portal";
 
   interface Props {
@@ -361,7 +362,7 @@
           type="button"
           class="icon-btn pencil"
           tabindex="-1"
-          title="Rename group (Alt+R when groups focused)"
+          title={`Rename group (${chordFor("renameItem")} when groups focused)`}
           aria-label={`Rename group ${groupName}`}
           onclick={(e) => {
             e.preventDefault();
@@ -384,7 +385,7 @@
       type="button"
       class="add-btn"
       tabindex="-1"
-      title="New conversation (Alt+N when conversations focused)"
+      title={`New conversation (${chordFor("newSession")} when conversations focused)`}
       disabled={creating}
       onclick={() => onCreate?.()}
     >
@@ -479,7 +480,7 @@
                 type="button"
                 class="icon-btn"
                 tabindex="-1"
-                title="Rename (Alt+R)"
+                title={`Rename (${chordFor("renameItem")})`}
                 aria-label={`Rename ${c.name}`}
                 onclick={(e) => {
                   e.preventDefault();

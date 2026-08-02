@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ChatMessage } from "$lib/types";
+  import { chordFor } from "$lib/stores";
 
   interface Props {
     message: ChatMessage;
@@ -38,7 +39,7 @@
       class="bubble clickable"
       class:streaming={message.streamState === "open"}
       class:tui={message.turnStatus === "tui"}
-      title="Open session terminal (Ctrl+`)"
+      title={`Open session terminal (${chordFor("toggleTerminal")})`}
       onclick={open}
     >
       <div class="meta">

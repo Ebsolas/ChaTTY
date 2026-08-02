@@ -26,8 +26,12 @@
     <div class="empty">
       <p class="lead">Talk to your local shell</p>
       <p class="muted">
-        Type a command below, or press <kbd>{chordFor("toggleTerminal")}</kbd> to open the session
-        terminal. New session: <kbd>{chordFor("newSession")}</kbd>.
+        Type a command below. Chat/composer <kbd>{chordFor("focusComposer")}</kbd> ·
+        palette <kbd>{chordFor("jumpPalette")}</kbd> ·
+        new session <kbd>{chordFor("newSession")}</kbd> ·
+        terminal <kbd>{chordFor("toggleTerminal")}</kbd>.
+        Panes: <kbd>Alt+Enter</kbd> / <kbd>Alt+Shift+1–9</kbd> open new ·
+        <kbd>Alt+Shift+Enter</kbd> replace · <kbd>Alt+←/→</kbd> focus · drag title bars to reorganize.
       </p>
     </div>
   {:else}
