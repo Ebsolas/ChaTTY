@@ -59,6 +59,44 @@ Tips:
 
 Bundles include **chatty-host** so sessions can outlive the UI. Windows builds are planned next.
 
+## Arch Linux (PKGBUILD, not on the AUR)
+
+Prebuilt binary packages live under [`packaging/arch/`](packaging/arch/). Use the directory that matches your machine.
+
+### x86_64 (standard Arch)
+
+```bash
+git clone https://github.com/Ebsolas/ChaTTY.git
+cd ChaTTY/packaging/arch/x86_64
+makepkg -si
+```
+
+With an AUR helper (local build of this PKGBUILD):
+
+```bash
+cd ChaTTY/packaging/arch/x86_64
+paru -Bi .
+# or: yay -Bi .
+```
+
+### aarch64 (Arch Linux ARM)
+
+```bash
+git clone https://github.com/Ebsolas/ChaTTY.git
+cd ChaTTY/packaging/arch/aarch64
+makepkg -si
+```
+
+```bash
+cd ChaTTY/packaging/arch/aarch64
+paru -Bi .
+# or: yay -Bi .
+```
+
+This installs package **`chatty-bin`** (launcher in `/usr/bin/chatty`, app files under `/opt/chatty`). It downloads the portable tarball from GitHub Releases—you need `base-devel` and network access on first build.
+
+See [`packaging/arch/README.md`](packaging/arch/README.md) for update notes.
+
 ## Build from source
 
 ### Prerequisites

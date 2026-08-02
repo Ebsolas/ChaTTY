@@ -1,0 +1,8 @@
+# makepkg outputs
+*/pkg/
+*/src/
+*/*.pkg.tar*
+*/*.tar.gz
+*/*.tar.xz
+*/*.log
+*/Chatty_*

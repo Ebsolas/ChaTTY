@@ -1,0 +1,96 @@
+# Maintainer: Ebsolas
+# Binary package for standard Arch Linux (x86_64).
+# Not on the AUR — build from this directory with makepkg / paru -Bi / yay -Bi.
+#
+# shellcheck disable=SC2034,SC2154
+
+pkgname=chatty-bin
+pkgver=0.1.0beta4
+pkgrel=1
+pkgdesc="Conversational terminal — Discord-style chat over shell sessions (prebuilt)"
+arch=('x86_64')
+url="https://github.com/Ebsolas/ChaTTY"
+license=('MIT')
+depends=(
+  'webkit2gtk-4.1'
+  'gtk3'
+  'libayatana-appindicator'
+  'librsvg'
+  'openssl'
+  'libsoup3'
+  'cairo'
+  'gdk-pixbuf2'
+  'glib2'
+  'hicolor-icon-theme'
+  'xdg-utils'
+)
+provides=('chatty')
+conflicts=('chatty' 'chatty-git')
+options=('!strip' '!debug')
+
+_tag="v0.1.0-beta.4"
+_appver="0.1.0"
+_asset="Chatty_${_appver}_linux_x86_64_portable.tar.gz"
+_srcdir="Chatty_${_appver}_linux_x86_64_portable"
+
+source=(
+  "${_asset}::https://github.com/Ebsolas/ChaTTY/releases/download/${_tag}/${_asset}"
+)
+sha256sums=(
+  'ff47f24db8493ba7577d79e909611fd4efbdd015924436b94237f0363399b6f8'
+)
+
+package() {
+  cd "${srcdir}/${_srcdir}"
+
+  install -d "${pkgdir}/opt/chatty"
+  cp -a --no-preserve=ownership . "${pkgdir}/opt/chatty/"
+
+  # Prefer AppRun so bundled libs / rpath layout stay correct.
+  install -Dm755 /dev/stdin "${pkgdir}/usr/bin/chatty" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+export APPDIR="/opt/chatty"
+export PATH="/opt/chatty/usr/bin:${PATH}"
+if [[ -x /opt/chatty/AppRun ]]; then
+  exec /opt/chatty/AppRun "$@"
+fi
+if [[ -x /opt/chatty/run-chatty.sh ]]; then
+  exec /opt/chatty/run-chatty.sh "$@"
+fi
+exec /opt/chatty/usr/bin/chatty "$@"
+EOF
+
+  install -Dm755 /dev/stdin "${pkgdir}/usr/bin/chatty-host" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exec /opt/chatty/usr/bin/chatty-host "$@"
+EOF
+
+  install -Dm644 /dev/stdin "${pkgdir}/usr/share/applications/chatty.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Chatty
+Comment=Conversational terminal — Discord-style chat over shell sessions
+Exec=chatty
+Icon=chatty
+Terminal=false
+Categories=Utility;System;TerminalEmulator;
+StartupWMClass=chatty
+EOF
+
+  if [[ -f Chatty.png ]]; then
+    install -Dm644 Chatty.png "${pkgdir}/usr/share/pixmaps/chatty.png"
+    install -Dm644 Chatty.png "${pkgdir}/usr/share/icons/hicolor/256x256/apps/chatty.png"
+  elif [[ -f usr/share/icons/hicolor/128x128/apps/chatty.png ]]; then
+    install -Dm644 usr/share/icons/hicolor/128x128/apps/chatty.png \
+      "${pkgdir}/usr/share/icons/hicolor/128x128/apps/chatty.png"
+    install -Dm644 usr/share/icons/hicolor/128x128/apps/chatty.png \
+      "${pkgdir}/usr/share/pixmaps/chatty.png"
+  fi
+
+  local license_src="${startdir}/../../../LICENSE"
+  if [[ -f "${license_src}" ]]; then
+    install -Dm644 "${license_src}" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  fi
+}
